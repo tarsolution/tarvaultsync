@@ -1,6 +1,6 @@
 # TAR Vault Sync: AI Development Contract
 
-For implementation and review tasks, read the repository skill at `skills/tarvaultsync-development/SKILL.md` and its relevant references. This path is tracked in Git and is available in every clone.
+For implementation and review tasks, use the discoverable repository skill at `.agents/skills/tarvaultsync-development/SKILL.md`. It points to the canonical skill at `skills/tarvaultsync-development/SKILL.md`.
 
 TAR Vault Sync is a local-first Rust security agent. Prefer the smallest correct change that preserves its security model: secrets must never be persisted outside approved providers or encrypted vault payloads, and never appear in logs, diagnostics, state, tests, or examples.
 
