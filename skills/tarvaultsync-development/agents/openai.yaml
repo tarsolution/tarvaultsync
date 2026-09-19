@@ -1,0 +1,4 @@
+interface:
+  display_name: "TAR Vault Sync Development"
+  short_description: "Build minimal, secure TAR Vault Sync code"
+  default_prompt: "Implement the requested TAR Vault Sync change with minimal, maintainable Rust and verify the affected behavior."
