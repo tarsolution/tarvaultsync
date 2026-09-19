@@ -28,6 +28,7 @@ There is no runnable build yet. Start with the [development guide](docs/developm
 - [Development guide](docs/development.md)
 - [Development environment](docs/development-environment.md)
 - [Project history](docs/history.md)
+- [Roadmap](docs/roadmap.md)
 - [Contributing](docs/contributing.md)
 - [AI development rules](AGENTS.md) and [project skill](skills/tarvaultsync-development/SKILL.md)
 
