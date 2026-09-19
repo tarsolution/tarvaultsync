@@ -2,7 +2,7 @@
 
 TAR Vault Sync is a planned local-first agent for keeping development secrets in sync across machines and project files. It is designed to read from Azure Key Vault, Google Secret Manager, or an optional encrypted vault stored in Google Drive or OneDrive, then apply the current values to configured local targets.
 
-**Status:** design and documentation stage. The agent, desktop UI, Dev Container, and release builds are not implemented yet.
+**Status:** Roadmap phase 1 has a Rust test host with fake source and target modules. Real secret providers, file renderers, native secure-store authentication, desktop UI, and release builds are not implemented yet.
 
 ## Intended capabilities
 
@@ -19,7 +19,7 @@ The design has no TAR Vault Sync server or database. Configuration stores source
 
 The implementation is planned in Rust. Day-to-day development and core tests will run in a local Dev Container, so the host needs Docker Desktop and a Dev Container-capable editor rather than a local Rust or cloud SDK installation. Native Windows, macOS, and Linux builds will run in GitHub Actions. Repository scripts are Bash-based.
 
-There is no runnable build yet. Start with the [development guide](docs/development.md) and [development environment decision](docs/development-environment.md) before scaffolding the implementation.
+Run `cargo test --workspace` for the phase 1 core, IPC, scheduler, and fake-module tests. The single binary's `config` mode displays both module-owned settings surfaces; `config <connection> <entry> <slot>` emits a fake-only JSON binding fixture. The `agent`, `sync`, `status`, and `logs` modes use a loopback IPC test host. They require `TAR_VAULT_SYNC_TEST_TOKEN` supplied through the environment; this is not a production credential store or a native UI. See the [development guide](docs/development.md) for the intended platform workflow.
 
 ## Documentation
 

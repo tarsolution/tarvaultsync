@@ -2,16 +2,28 @@
 
 TAR Vault Sync will be built in the following order. Each phase should deliver a usable vertical slice with focused tests and documentation. Connector and sync modules own their configuration UI; the core provides only the contracts and host surface for those screens.
 
-The project is currently in the design stage. This roadmap describes intended work, not completed features.
+Phase 1 is complete for the fake-module test host described below; [independent QA](qa-phase1.md) records the evidence and platform limits. Later phases remain planned. [Requirements](requirements.md) define the product and security constraints.
 
 ## 1. Core infrastructure
+
+**Status:** Complete for the fake-module test host; native secure-store authentication, desktop packaging, and platform integration remain later work.
 
 - Define typed contracts for vault stores, source connections, local sync targets, secret payloads, and sync outcomes.
 - Provide module registration and UI mounting so each store connector and local sync module can supply its own settings screen.
 - Implement versioned JSON configuration, per-device state, redacted NDJSON events, and local IPC between the background agent and the on-demand UI.
 - Implement a scheduler with interval, manual trigger, jitter, retry/backoff, and single-flight execution per binding.
 
-**Done when:** a fake store and fake sync module can register their own settings UI and run a scheduled or manual sync without a real secret provider.
+**Acceptance criteria:**
+
+- Typed core contracts cover source references and versions, byte-safe payloads, targets, bindings, missing-target policy, sync outcomes, and module registration. A fake store and fake target module implement them.
+- Versioned JSON configuration rejects unsupported versions, malformed or secret-bearing fields, and invalid target scope. Per-device state survives restart and contains only safe metadata.
+- Fake source checks metadata first. An unchanged version does not fetch a payload; a changed version fetches and applies once. State advances only after success; a failed application remains retryable.
+- Both interval and manual triggers execute through the same single-flight path. Concurrent triggers for one binding never overlap, and retry/backoff with jitter has deterministic tests.
+- An authenticated local IPC client can request status and trigger a sync; an unauthenticated client is rejected. The agent runs with the UI closed.
+- The host mounts or resolves each fake module's own settings screen, proving both registration and UI ownership. A lightweight test host is sufficient for this phase.
+- Events parse as redacted NDJSON, and tests verify fake payloads and credential-like inputs cannot enter configuration, state, events, or errors. Focused unit and integration tests pass.
+
+**Done when:** the fake store and fake target module complete an end-to-end scheduled and manual sync through the core, IPC, and UI host, with the criteria above verified. Real providers, encrypted vaults, file renderers, and native packaging begin in later phases.
 
 ## 2. Vault entry and local vault store
 
