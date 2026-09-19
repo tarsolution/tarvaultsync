@@ -1,0 +1,38 @@
+name: Native desktop build
+
+on:
+  workflow_dispatch:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            artifact: tar-vault-sync-windows
+            executable: target/release/tar-vault-sync.exe
+          - runner: macos-latest
+            artifact: tar-vault-sync-macos
+            executable: target/release/tar-vault-sync
+          - runner: ubuntu-latest
+            artifact: tar-vault-sync-linux
+            executable: target/release/tar-vault-sync
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust stable
+        run: rustup update stable
+      - name: Tests
+        run: cargo test --workspace --locked
+      - name: Desktop binary
+        run: cargo build --release --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.executable }}
+          if-no-files-found: error

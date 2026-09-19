@@ -1,6 +1,7 @@
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -9,6 +10,22 @@ use std::{
 };
 
 pub const SCHEMA_VERSION: u32 = 1;
+
+pub fn acquire_agent_lock(path: &Path) -> std::io::Result<fs::File> {
+    if fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return Err(std::io::Error::other("agent lock path is a symlink"));
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    file.try_lock_exclusive()?;
+    Ok(file)
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -50,15 +67,57 @@ pub enum TargetSpec {
     StructuredField {
         path: PathBuf,
         key: String,
+        format: StructuredFormat,
     },
     DockerInput {
         path: PathBuf,
         key: String,
+        input: DockerInputKind,
     },
     GitCredential {
         protocol: String,
         host: String,
         path: Option<String>,
+        username: String,
+    },
+}
+#[derive(Clone, Hash, PartialEq, Eq)]
+enum TargetIdentity {
+    File(PathBuf),
+    GitCredential(String, String, Option<String>),
+    Fake(String),
+}
+impl TargetSpec {
+    fn identity(&self) -> TargetIdentity {
+        match self {
+            Self::WholeFile { path }
+            | Self::StructuredField { path, .. }
+            | Self::DockerInput { path, .. } => TargetIdentity::File(path.clone()),
+            Self::GitCredential {
+                protocol,
+                host,
+                path,
+                ..
+            } => TargetIdentity::GitCredential(protocol.clone(), host.clone(), path.clone()),
+            Self::Fake { slot } => TargetIdentity::Fake(slot.clone()),
+        }
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StructuredFormat {
+    DotEnv,
+    Json,
+    Yaml,
+    Properties,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DockerInputKind {
+    ComposeEnvironment,
+    EnvFile {
+        compose_path: PathBuf,
+        service: String,
     },
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -68,12 +127,12 @@ pub enum MissingTargetPolicy {
     Recreate,
     Disable,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Schedule {
     pub interval_seconds: u64,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Binding {
     pub id: String,
@@ -95,6 +154,8 @@ pub struct State {
     pub version: u32,
     pub applied: BTreeMap<String, SourceVersion>,
     pub status: BTreeMap<String, RedactedStatus>,
+    #[serde(default)]
+    pub disabled: BTreeSet<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -126,6 +187,7 @@ impl Drop for SecretPayload {
 pub enum SyncOutcome {
     Unchanged,
     Applied,
+    RestartRequired,
     Disabled,
     Failed(ErrorCategory),
 }
@@ -156,6 +218,17 @@ pub trait SourceConnection: Send + Sync {
 pub trait LocalTarget: Send + Sync {
     fn validate(&self, spec: &TargetSpec, kind: &SecretType) -> Result<(), ErrorCategory>;
     fn apply(&self, spec: &TargetSpec, payload: &SecretPayload) -> Result<(), ErrorCategory>;
+    fn is_missing(&self, _spec: &TargetSpec) -> bool {
+        false
+    }
+    fn apply_with_policy(
+        &self,
+        spec: &TargetSpec,
+        payload: &SecretPayload,
+        _policy: &MissingTargetPolicy,
+    ) -> Result<(), ErrorCategory> {
+        self.apply(spec, payload)
+    }
 }
 pub trait SettingsScreen: Send + Sync {
     fn module_id(&self) -> &'static str;
@@ -276,23 +349,108 @@ pub fn validate_config(data: &[u8], root: &Path) -> Result<Config, ErrorCategory
         }
         match &b.target {
             TargetSpec::Fake { slot } if safe_label(slot) => {}
-            TargetSpec::WholeFile { path }
-            | TargetSpec::StructuredField { path, .. }
-            | TargetSpec::DockerInput { path, .. }
-                if path.is_absolute()
-                    && path.starts_with(root)
-                    && !path
-                        .components()
-                        .any(|c| matches!(c, std::path::Component::ParentDir)) => {}
-            TargetSpec::GitCredential { protocol, host, .. }
-                if !protocol.is_empty() && !host.is_empty() => {}
+            TargetSpec::WholeFile { path } if valid_scoped_path(path, root) => {}
+            TargetSpec::StructuredField { path, key, format }
+                if valid_scoped_path(path, root) && valid_field_key(key, format) => {}
+            TargetSpec::DockerInput { path, key, input }
+                if valid_scoped_path(path, root) && valid_docker_key(key, input, root) => {}
+            TargetSpec::GitCredential {
+                protocol,
+                host,
+                path,
+                username,
+            } if protocol == "https"
+                && safe_host(host)
+                && safe_git_path(path.as_deref())
+                && safe_git_username(username) => {}
             _ => return Err(ErrorCategory::InvalidConfig),
         }
-        if b.source.store != StoreKind::Fake || !matches!(b.target, TargetSpec::Fake { .. }) {
+        if matches!(b.source.store, StoreKind::Fake) != matches!(b.target, TargetSpec::Fake { .. })
+            || !matches!(b.source.store, StoreKind::Fake | StoreKind::LocalVault)
+        {
             return Err(ErrorCategory::InvalidConfig);
         }
     }
     Ok(config)
+}
+fn valid_scoped_path(path: &Path, root: &Path) -> bool {
+    if !path.is_absolute()
+        || !path.starts_with(root)
+        || path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return false;
+    }
+    let Ok(approved) = root.canonicalize() else {
+        return false;
+    };
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let Ok(parent) = parent.canonicalize() else {
+        return false;
+    };
+    if !parent.starts_with(approved) {
+        return false;
+    }
+    !fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+}
+fn valid_field_key(key: &str, format: &StructuredFormat) -> bool {
+    match format {
+        StructuredFormat::DotEnv | StructuredFormat::Properties => {
+            !key.is_empty()
+                && key
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+        }
+        StructuredFormat::Json | StructuredFormat::Yaml => {
+            key.starts_with('/') && key.len() > 1 && !key.contains('\n') && !key.contains('\r')
+        }
+    }
+}
+fn valid_docker_key(key: &str, input: &DockerInputKind, root: &Path) -> bool {
+    let valid_name = |name: &str| {
+        !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    };
+    match input {
+        DockerInputKind::EnvFile {
+            compose_path,
+            service,
+        } => valid_name(key) && safe_label(service) && valid_scoped_path(compose_path, root),
+        DockerInputKind::ComposeEnvironment => key
+            .split_once(':')
+            .is_some_and(|(service, variable)| safe_label(service) && valid_name(variable)),
+    }
+}
+fn safe_host(host: &str) -> bool {
+    !host.is_empty()
+        && host.len() <= 253
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':'))
+}
+fn safe_git_path(path: Option<&str>) -> bool {
+    path.is_none_or(|p| {
+        !p.is_empty()
+            && p.len() <= 512
+            && !p.starts_with('/')
+            && p.split('/').all(|part| {
+                !part.is_empty()
+                    && part != "."
+                    && part != ".."
+                    && part
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+            })
+    })
+}
+fn safe_git_username(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name
+            .bytes()
+            .all(|b| (0x21..=0x7e).contains(&b) && b != b'=' && b != b'\\')
 }
 fn atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<(), ErrorCategory> {
     let bytes = serde_json::to_vec_pretty(value).map_err(|_| ErrorCategory::State)?;
@@ -358,6 +516,7 @@ pub fn load_state(path: &Path) -> Result<State, ErrorCategory> {
             .iter()
             .any(|(k, v)| !safe_label(k) || !safe_version(&v.0))
         || s.status.keys().any(|k| !safe_label(k))
+        || s.disabled.iter().any(|k| !safe_label(k))
     {
         return Err(ErrorCategory::State);
     }
@@ -376,6 +535,8 @@ pub struct Event {
 #[serde(rename_all = "snake_case")]
 pub enum EventOperation {
     Sync,
+    AcknowledgeRestart,
+    Enable,
 }
 pub struct Engine {
     pub config: Config,
@@ -385,6 +546,7 @@ pub struct Engine {
     pub source: Arc<dyn SourceConnection>,
     pub target: Arc<dyn LocalTarget>,
     flights: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    target_flights: Mutex<HashMap<TargetIdentity, Arc<tokio::sync::Mutex<()>>>>,
 }
 impl Engine {
     pub fn new(
@@ -403,7 +565,20 @@ impl Engine {
             source,
             target,
             flights: Mutex::new(HashMap::new()),
+            target_flights: Mutex::new(HashMap::new()),
         })
+    }
+    pub fn invalidate_bindings(&self, ids: &[String]) -> Result<(), ErrorCategory> {
+        let mut state = self.state.lock().map_err(|_| ErrorCategory::State)?;
+        let mut next = state.clone();
+        for id in ids {
+            next.applied.remove(id);
+            next.status.remove(id);
+            next.disabled.remove(id);
+        }
+        atomic_json(&self.state_path, &next)?;
+        *state = next;
+        Ok(())
     }
     pub async fn sync(&self, id: &str) -> SyncOutcome {
         let binding = match self.config.bindings.iter().find(|b| b.id == id) {
@@ -417,7 +592,10 @@ impl Engine {
                 .clone()
         };
         let _flight = gate.lock().await;
-        let outcome = self.sync_inner(binding);
+        if self.state.lock().unwrap().disabled.contains(id) {
+            return SyncOutcome::Disabled;
+        }
+        let outcome = self.sync_inner(binding).await;
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -432,6 +610,9 @@ impl Engine {
                     outcome: outcome.clone(),
                 },
             );
+            if outcome == SyncOutcome::Disabled {
+                next.disabled.insert(id.to_owned());
+            }
             if atomic_json(&self.state_path, &next).is_err() {
                 return SyncOutcome::Failed(ErrorCategory::State);
             }
@@ -449,9 +630,100 @@ impl Engine {
         }
         outcome
     }
-    fn sync_inner(&self, b: &Binding) -> SyncOutcome {
+    pub async fn enable_binding(&self, id: &str) -> Result<(), ErrorCategory> {
+        let binding = self
+            .config
+            .bindings
+            .iter()
+            .find(|b| b.id == id)
+            .ok_or(ErrorCategory::InvalidConfig)?;
+        let gate = {
+            let mut gates = self.flights.lock().unwrap();
+            gates
+                .entry(id.to_owned())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        let _flight = gate.lock().await;
+        let mut state = self.state.lock().unwrap();
+        let mut next = state.clone();
+        if !next.disabled.remove(id) {
+            return Err(ErrorCategory::InvalidConfig);
+        }
+        atomic_json(&self.state_path, &next)?;
+        *state = next;
+        drop(state);
+        self.append_event(&Event {
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            binding_id: id.to_owned(),
+            operation: EventOperation::Enable,
+            source_kind: binding.source.store.clone(),
+            outcome: SyncOutcome::Unchanged,
+        })
+    }
+    pub async fn acknowledge_restart(&self, id: &str) -> Result<(), ErrorCategory> {
+        let binding = self
+            .config
+            .bindings
+            .iter()
+            .find(|b| b.id == id)
+            .ok_or(ErrorCategory::InvalidConfig)?;
+        if !matches!(binding.target, TargetSpec::DockerInput { .. }) {
+            return Err(ErrorCategory::InvalidConfig);
+        }
+        let gate = {
+            let mut gates = self.flights.lock().unwrap();
+            gates
+                .entry(id.to_owned())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        let _flight = gate.lock().await;
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        {
+            let mut state = self.state.lock().unwrap();
+            if !matches!(
+                state.status.get(id).map(|s| &s.outcome),
+                Some(SyncOutcome::RestartRequired)
+            ) {
+                return Err(ErrorCategory::InvalidConfig);
+            }
+            let mut next = state.clone();
+            next.status.insert(
+                id.to_owned(),
+                RedactedStatus {
+                    timestamp,
+                    outcome: SyncOutcome::Unchanged,
+                },
+            );
+            atomic_json(&self.state_path, &next)?;
+            *state = next;
+        }
+        self.append_event(&Event {
+            timestamp,
+            binding_id: id.to_owned(),
+            operation: EventOperation::AcknowledgeRestart,
+            source_kind: binding.source.store.clone(),
+            outcome: SyncOutcome::Unchanged,
+        })
+    }
+    async fn sync_inner(&self, b: &Binding) -> SyncOutcome {
         if let Err(e) = self.target.validate(&b.target, &b.secret_type) {
             return SyncOutcome::Failed(e);
+        }
+        let target_missing = self.target.is_missing(&b.target);
+        if target_missing {
+            match &b.missing_target {
+                MissingTargetPolicy::Alert => return SyncOutcome::Failed(ErrorCategory::Target),
+                MissingTargetPolicy::Disable => return SyncOutcome::Disabled,
+                MissingTargetPolicy::Recreate => {}
+            }
         }
         let version = match self.source.get_version(&b.source) {
             Ok(v) => v,
@@ -460,8 +732,21 @@ impl Engine {
         if !safe_version(&version.0) {
             return SyncOutcome::Failed(ErrorCategory::VersionConflict);
         }
-        if self.state.lock().unwrap().applied.get(&b.id) == Some(&version) {
-            return SyncOutcome::Unchanged;
+        if !target_missing && self.state.lock().unwrap().applied.get(&b.id) == Some(&version) {
+            return if matches!(b.target, TargetSpec::DockerInput { .. })
+                && matches!(
+                    self.state
+                        .lock()
+                        .unwrap()
+                        .status
+                        .get(&b.id)
+                        .map(|s| &s.outcome),
+                    Some(SyncOutcome::RestartRequired)
+                ) {
+                SyncOutcome::RestartRequired
+            } else {
+                SyncOutcome::Unchanged
+            };
         }
         let payload = match self.source.get_value(&b.source, &version) {
             Ok(p) => p,
@@ -470,7 +755,18 @@ impl Engine {
         if payload.kind != b.secret_type {
             return SyncOutcome::Failed(ErrorCategory::VersionConflict);
         }
-        if let Err(e) = self.target.apply(&b.target, &payload) {
+        let target_gate = {
+            let mut gates = self.target_flights.lock().unwrap();
+            gates
+                .entry(b.target.identity())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        let _target_flight = target_gate.lock().await;
+        if let Err(e) = self
+            .target
+            .apply_with_policy(&b.target, &payload, &b.missing_target)
+        {
             return SyncOutcome::Failed(e);
         }
         let mut state = self.state.lock().unwrap();
@@ -480,7 +776,11 @@ impl Engine {
             return SyncOutcome::Failed(ErrorCategory::State);
         }
         *state = next;
-        SyncOutcome::Applied
+        if matches!(b.target, TargetSpec::DockerInput { .. }) {
+            SyncOutcome::RestartRequired
+        } else {
+            SyncOutcome::Applied
+        }
     }
     fn append_event(&self, e: &Event) -> Result<(), ErrorCategory> {
         const LIMIT: u64 = 1024 * 1024;
@@ -570,6 +870,15 @@ impl LocalTarget for FakeTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn single_agent_lock_rejects_second_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.lock");
+        let first = acquire_agent_lock(&path).unwrap();
+        assert!(acquire_agent_lock(&path).is_err());
+        drop(first);
+        assert!(acquire_agent_lock(&path).is_ok());
+    }
     fn binding() -> Binding {
         Binding {
             id: "b1".into(),
@@ -743,6 +1052,153 @@ mod tests {
         }
         assert_eq!(applied, 1);
         assert_eq!(*target.applies.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn docker_restart_notice_and_recreate_are_explicit() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(FakeStore {
+            version: Mutex::new(SourceVersion("v1".into())),
+            reads: Mutex::new((0, 0)),
+        });
+        let target_path = dir.path().join("app.env");
+        fs::write(
+            dir.path().join("compose.yaml"),
+            "services:\n  web:\n    env_file: app.env\n",
+        )
+        .unwrap();
+        let engine = Engine::new(
+            Config {
+                version: 1,
+                bindings: vec![Binding {
+                    target: TargetSpec::DockerInput {
+                        path: target_path.clone(),
+                        key: "TOKEN".into(),
+                        input: DockerInputKind::EnvFile {
+                            compose_path: dir.path().join("compose.yaml"),
+                            service: "web".into(),
+                        },
+                    },
+                    missing_target: MissingTargetPolicy::Recreate,
+                    ..binding()
+                }],
+            },
+            dir.path().join("state.json"),
+            dir.path().join("events.ndjson"),
+            store.clone(),
+            Arc::new(crate::targets::ProductionTarget::new(dir.path().to_path_buf()).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(engine.sync("b1").await, SyncOutcome::RestartRequired);
+        assert!(target_path.exists());
+        assert_eq!(engine.sync("b1").await, SyncOutcome::RestartRequired);
+        assert_eq!(*store.reads.lock().unwrap(), (2, 1));
+        engine.acknowledge_restart("b1").await.unwrap();
+        assert_eq!(engine.sync("b1").await, SyncOutcome::Unchanged);
+        fs::remove_file(&target_path).unwrap();
+        assert_eq!(engine.sync("b1").await, SyncOutcome::RestartRequired);
+        assert_eq!(*store.reads.lock().unwrap(), (4, 2));
+    }
+
+    #[tokio::test]
+    async fn local_vault_rotation_updates_authorized_file_without_persisting_payload_metadata() {
+        use crate::vault::{LocalVault, VaultSource};
+        let dir = tempfile::tempdir().unwrap();
+        let vault_path = dir.path().join("vault.bin");
+        let target_path = dir.path().join("target.bin");
+        fs::write(&target_path, b"old").unwrap();
+        let mut vault = LocalVault::create(&vault_path, "test-only-passphrase").unwrap();
+        vault
+            .put(
+                "entry",
+                &SecretPayload::new(b"PROBE-ONE".to_vec(), SecretType::Binary),
+            )
+            .unwrap();
+        vault.lock();
+        let source = Arc::new(VaultSource::new(vault_path.clone(), "local".into()).unwrap());
+        source.unlock("test-only-passphrase").unwrap();
+        let binding = Binding {
+            id: "b1".into(),
+            source: SourceRef {
+                store: StoreKind::LocalVault,
+                connection: "local".into(),
+                entry: "entry".into(),
+            },
+            secret_type: SecretType::Binary,
+            target: TargetSpec::WholeFile {
+                path: target_path.clone(),
+            },
+            missing_target: MissingTargetPolicy::Alert,
+            schedule: Schedule {
+                interval_seconds: 60,
+            },
+        };
+        let config = Config {
+            version: 1,
+            bindings: vec![binding],
+        };
+        let bytes = serde_json::to_vec(&config).unwrap();
+        let config = validate_config(&bytes, dir.path()).unwrap();
+        let engine = Engine::new(
+            config,
+            dir.path().join("state.json"),
+            dir.path().join("events.ndjson"),
+            source,
+            Arc::new(crate::targets::ProductionTarget::new(dir.path().to_path_buf()).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(engine.sync("b1").await, SyncOutcome::Applied);
+        assert_eq!(fs::read(&target_path).unwrap(), b"PROBE-ONE");
+        assert_eq!(engine.sync("b1").await, SyncOutcome::Unchanged);
+        let mut vault = LocalVault::unlock(&vault_path, "test-only-passphrase").unwrap();
+        vault
+            .put(
+                "entry",
+                &SecretPayload::new(b"PROBE-TWO".to_vec(), SecretType::Binary),
+            )
+            .unwrap();
+        assert_eq!(engine.sync("b1").await, SyncOutcome::Applied);
+        assert_eq!(fs::read(&target_path).unwrap(), b"PROBE-TWO");
+        let metadata = [
+            fs::read(dir.path().join("state.json")).unwrap(),
+            fs::read(dir.path().join("events.ndjson")).unwrap(),
+        ]
+        .concat();
+        assert!(!metadata
+            .windows(b"PROBE-TWO".len())
+            .any(|window| window == b"PROBE-TWO"));
+    }
+
+    #[tokio::test]
+    async fn missing_target_disable_requires_explicit_enable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("target.txt");
+        let store = Arc::new(FakeStore {
+            version: Mutex::new(SourceVersion("v1".into())),
+            reads: Mutex::new((0, 0)),
+        });
+        let engine = Engine::new(
+            Config {
+                version: 1,
+                bindings: vec![Binding {
+                    target: TargetSpec::WholeFile { path: path.clone() },
+                    missing_target: MissingTargetPolicy::Disable,
+                    ..binding()
+                }],
+            },
+            dir.path().join("state.json"),
+            dir.path().join("events.ndjson"),
+            store.clone(),
+            Arc::new(crate::targets::ProductionTarget::new(dir.path().to_path_buf()).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(engine.sync("b1").await, SyncOutcome::Disabled);
+        assert!(engine.status().disabled.contains("b1"));
+        fs::write(&path, b"old").unwrap();
+        assert_eq!(engine.sync("b1").await, SyncOutcome::Disabled);
+        assert_eq!(*store.reads.lock().unwrap(), (0, 0));
+        engine.enable_binding("b1").await.unwrap();
+        assert_eq!(engine.sync("b1").await, SyncOutcome::Applied);
     }
 
     #[test]

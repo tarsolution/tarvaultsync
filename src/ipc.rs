@@ -12,13 +12,24 @@ pub enum Request {
     Status { token: String },
     Events { token: String },
     Trigger { token: String, binding_id: String },
+    AcknowledgeRestart { token: String, binding_id: String },
+    Enable { token: String, binding_id: String },
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum Response {
-    Status { applied: Vec<String> },
-    Events { events: Vec<crate::core::Event> },
-    Trigger { outcome: SyncOutcome },
+    Status {
+        applied: Vec<String>,
+        restart_required: Vec<String>,
+        disabled: Vec<String>,
+    },
+    Events {
+        events: Vec<crate::core::Event>,
+    },
+    Trigger {
+        outcome: SyncOutcome,
+    },
+    Acknowledged,
     Failed,
     Unauthorized,
     Invalid,
@@ -48,9 +59,19 @@ async fn handle(stream: TcpStream, engine: Arc<Engine>, token: &str) -> std::io:
         return Ok(());
     }
     let response = match serde_json::from_slice::<Request>(&line) {
-        Ok(Request::Status { token: t }) if t == token => Response::Status {
-            applied: engine.status().applied.keys().cloned().collect(),
-        },
+        Ok(Request::Status { token: t }) if t == token => {
+            let state = engine.status();
+            Response::Status {
+                applied: state.applied.keys().cloned().collect(),
+                restart_required: state
+                    .status
+                    .iter()
+                    .filter(|(_, s)| s.outcome == SyncOutcome::RestartRequired)
+                    .map(|(id, _)| id.clone())
+                    .collect(),
+                disabled: state.disabled.iter().cloned().collect(),
+            }
+        }
         Ok(Request::Events { token: t }) if t == token => {
             match std::fs::read_to_string(&engine.events_path) {
                 Ok(data) => {
@@ -80,6 +101,26 @@ async fn handle(stream: TcpStream, engine: Arc<Engine>, token: &str) -> std::io:
         }) if t == token => Response::Trigger {
             outcome: engine.sync(&binding_id).await,
         },
+        Ok(Request::AcknowledgeRestart {
+            token: t,
+            binding_id,
+        }) if t == token => {
+            if engine.acknowledge_restart(&binding_id).await.is_ok() {
+                Response::Acknowledged
+            } else {
+                Response::Failed
+            }
+        }
+        Ok(Request::Enable {
+            token: t,
+            binding_id,
+        }) if t == token => {
+            if engine.enable_binding(&binding_id).await.is_ok() {
+                Response::Acknowledged
+            } else {
+                Response::Failed
+            }
+        }
         Ok(_) => Response::Unauthorized,
         Err(_) => Response::Invalid,
     };
@@ -180,7 +221,7 @@ mod tests {
             }
         ));
         assert!(
-            matches!(request(addr, &Request::Status { token: "private-test-token".into() }).await.unwrap(), Response::Status { applied } if applied == vec!["b1"])
+            matches!(request(addr, &Request::Status { token: "private-test-token".into() }).await.unwrap(), Response::Status { applied, .. } if applied == vec!["b1"])
         );
         assert!(
             matches!(request(addr, &Request::Events { token: "private-test-token".into() }).await.unwrap(), Response::Events { events } if events.len() == 1)

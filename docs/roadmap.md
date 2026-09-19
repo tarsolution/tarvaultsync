@@ -2,7 +2,7 @@
 
 TAR Vault Sync will be built in the following order. Each phase should deliver a usable vertical slice with focused tests and documentation. Connector and sync modules own their configuration UI; the core provides only the contracts and host surface for those screens.
 
-Phase 1 is complete for the fake-module test host described below; [independent QA](qa-phase1.md) records the evidence and platform limits. Later phases remain planned. [Requirements](requirements.md) define the product and security constraints.
+Phase 1 is complete for the fake-module test host described below. Phases 2–5 have development implementations; [phase 2–5 QA](qa-phase2-5.md) records verified behavior and remaining native release gates. Later phases remain planned. [Requirements](requirements.md) define the product and security constraints.
 
 ## 1. Core infrastructure
 
@@ -27,6 +27,8 @@ Phase 1 is complete for the fake-module test host described below; [independent 
 
 ## 2. Vault entry and local vault store
 
+**Status:** Encrypted store, CLI flow, and native desktop vault entry screen implemented; platform packaging and visual QA remain open.
+
 - Build the vault unlock/entry screen and local encrypted vault store.
 - Define the store-connection UI contract used by local and future cloud stores.
 - Support explicit secret types and byte-safe storage for strings, text, JSON, certificates, private keys, and binary files.
@@ -36,6 +38,8 @@ Phase 1 is complete for the fake-module test host described below; [independent 
 
 ## 3. File sync
 
+**Status:** Implemented and covered by focused Linux-container tests; native-platform validation remains open.
+
 - Map a secret to an entire file or a selected `.env`, JSON, YAML, or properties field.
 - Support text and binary outputs, including PEM, CRT, CA, P12/PFX, and private-key files.
 - Preserve unrelated content where the format permits; validate paths and write atomically.
@@ -44,12 +48,16 @@ Phase 1 is complete for the fake-module test host described below; [independent 
 
 ## 4. Docker sync
 
+**Status:** Compose mapping and `env_file` inputs implemented, with restart-required status; native-platform validation remains open.
+
 - Support Docker Compose environment values and `env_file` targets.
 - Define separately whether Docker secrets or container restart hooks are needed; do not assume writing a file updates a running container.
 
 **Done when:** configured Docker inputs are updated safely and the UI states when a container restart is required.
 
 ## 5. Git credentials
+
+**Status:** GCM protocol target implemented; Windows credential-store and path-scope smoke checks passed, while integrated agent and macOS/Linux checks remain open.
 
 - Synchronize HTTPS credentials into Git Credential Manager using Git's credential protocol.
 - Match by protocol, host, and optional repository path. Avoid plaintext `~/.git-credentials` storage.

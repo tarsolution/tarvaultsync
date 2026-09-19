@@ -2,7 +2,7 @@
 
 TAR Vault Sync is a planned local-first agent for keeping development secrets in sync across machines and project files. It is designed to read from Azure Key Vault, Google Secret Manager, or an optional encrypted vault stored in Google Drive or OneDrive, then apply the current values to configured local targets.
 
-**Status:** Roadmap phase 1 has a Rust test host with fake source and target modules. Real secret providers, file renderers, native secure-store authentication, desktop UI, and release builds are not implemented yet.
+**Status:** Roadmap phases 2–5 have a local encrypted vault, file and Docker renderers, a Git Credential Manager target, and a native Rust management window. This is not a packaged desktop release: platform builds, secure-store IPC authentication for the separate `agent` mode, and macOS/Linux integration checks remain open. See the [phase 2–5 QA record](docs/qa-phase2-5.md).
 
 ## Intended capabilities
 
@@ -19,7 +19,9 @@ The design has no TAR Vault Sync server or database. Configuration stores source
 
 The implementation is planned in Rust. Day-to-day development and core tests will run in a local Dev Container, so the host needs Docker Desktop and a Dev Container-capable editor rather than a local Rust or cloud SDK installation. Native Windows, macOS, and Linux builds will run in GitHub Actions. Repository scripts are Bash-based.
 
-Run `cargo test --workspace` for the phase 1 core, IPC, scheduler, and fake-module tests. The single binary's `config` mode displays both module-owned settings surfaces; `config <connection> <entry> <slot>` emits a fake-only JSON binding fixture. The `agent`, `sync`, `status`, and `logs` modes use a loopback IPC test host. They require `TAR_VAULT_SYNC_TEST_TOKEN` supplied through the environment; this is not a production credential store or a native UI. See the [development guide](docs/development.md) for the intended platform workflow.
+Run `cargo test --workspace` for the core and phase 2–5 tests. On a machine with a graphical desktop and Rust 1.95 or newer, set `TAR_VAULT_SYNC_DIR` to the workspace root and run `cargo run -- desktop`. The native window manages local-vault creation/unlock/lock, entry rotation/removal, encrypted backup/recovery, typed bindings, sync/status, restart acknowledgement, disabled-binding reactivation, and redacted events. It uses no browser or local HTTP server. The window runs the scheduler while open; the separate `agent` mode remains available for background operation and still uses the development-only `TAR_VAULT_SYNC_TEST_TOKEN` IPC credential. Do not treat that mode as production authentication. CLI vault/config commands remain available; see the [development guide](docs/development.md).
+
+The window's Yönetim page can switch to an existing workspace root. Only one writer (`desktop` or `agent`) may own a workspace at a time. The [native build workflow](.github/workflows/desktop-build.yml) can produce Windows, macOS, and Linux binaries when run in GitHub Actions; the workflow has not yet been exercised on those runners.
 
 ## Documentation
 

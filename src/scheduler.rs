@@ -110,7 +110,7 @@ mod tests {
         tokio::task::yield_now().await;
         assert_eq!(*target.applies.lock().unwrap(), 2);
         assert!(
-            matches!(request(addr,&Request::Status { token:"test-token".into() }).await.unwrap(),Response::Status { applied } if applied==vec!["b1"])
+            matches!(request(addr,&Request::Status { token:"test-token".into() }).await.unwrap(),Response::Status { applied, .. } if applied==vec!["b1"])
         );
         assert_eq!(interval_delay(2, 2), Duration::from_secs(4));
         assert_eq!(retry_delay(2, 17), Duration::from_millis(4017));

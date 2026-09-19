@@ -6,7 +6,7 @@ The production implementation is Rust-first:
 
 - Rust core for provider clients, file rendering, validation, and agent lifecycle.
 - Tokio for asynchronous polling and IPC.
-- Tauri with a Rust-oriented UI framework for the on-demand configuration application.
+- A native Rust window for the on-demand configuration application (currently eframe/egui; no browser host).
 - Native secure-store adapters for Windows, macOS, and Linux.
 
 The agent must not depend on the UI process to stay alive.
