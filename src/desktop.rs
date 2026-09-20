@@ -20,8 +20,13 @@ use std::{
 use tokio::task::JoinHandle;
 use zeroize::{Zeroize, Zeroizing};
 
-const ACCENT: Color32 = Color32::from_rgb(204, 239, 123);
-const MUTED: Color32 = Color32::from_rgb(145, 166, 180);
+const ACCENT: Color32 = Color32::from_rgb(15, 118, 110);
+const MUTED: Color32 = Color32::from_rgb(105, 119, 137);
+const INK: Color32 = Color32::from_rgb(24, 39, 57);
+const CANVAS: Color32 = Color32::from_rgb(245, 247, 250);
+const BORDER: Color32 = Color32::from_rgb(225, 231, 237);
+const NAV: Color32 = Color32::from_rgb(19, 32, 48);
+const DANGER: Color32 = Color32::from_rgb(185, 55, 62);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
@@ -56,11 +61,11 @@ impl TargetChoice {
     ];
     fn label(self) -> &'static str {
         match self {
-            Self::WholeFile => "Tüm dosya",
-            Self::DotEnv => ".env alanı",
-            Self::Json => "JSON alanı",
-            Self::Yaml => "YAML alanı",
-            Self::Properties => "Properties alanı",
+            Self::WholeFile => "Whole file",
+            Self::DotEnv => ".env variable",
+            Self::Json => "JSON field",
+            Self::Yaml => "YAML field",
+            Self::Properties => "Properties field",
             Self::DockerCompose => "Docker Compose environment",
             Self::DockerEnvFile => "Docker env_file",
             Self::GitCredential => "Git Credential Manager",
@@ -206,7 +211,7 @@ impl BindingForm {
         let interval_seconds = self
             .interval
             .parse()
-            .map_err(|_| "Kontrol aralığı geçersiz")?;
+            .map_err(|_| "Enter a valid check interval.")?;
         Ok(Binding {
             id: self.id.clone(),
             source: SourceRef {
@@ -269,7 +274,7 @@ impl DesktopApp {
             .iter()
             .any(|b| b.source.store != StoreKind::LocalVault || b.source.connection != "local")
         {
-            return Err("Masaüstü arayüzü yalnızca yerel kasa eşlemelerini yönetir".into());
+            return Err("The desktop app supports local vault bindings only.".into());
         }
         let source = Arc::new(VaultSource::new(
             root.join("local/vault.bin"),
@@ -320,8 +325,9 @@ impl DesktopApp {
         self.is_error = true;
     }
     fn save_config(&mut self, config: Config) -> Result<(), &'static str> {
-        let bytes = serde_json::to_vec_pretty(&config).map_err(|_| "Yapılandırma kodlanamadı")?;
-        core::validate_config(&bytes, &self.root).map_err(|_| "Yapılandırma geçersiz")?;
+        let bytes = serde_json::to_vec_pretty(&config)
+            .map_err(|_| "Could not encode the configuration.")?;
+        core::validate_config(&bytes, &self.root).map_err(|_| "The configuration is invalid.")?;
         for binding in &config.bindings {
             if binding.source.store != StoreKind::LocalVault
                 || binding.source.connection != "local"
@@ -330,17 +336,19 @@ impl DesktopApp {
                     .validate(&binding.target, &binding.secret_type)
                     .is_err()
             {
-                return Err("Hedef veya sır türü geçersiz");
+                return Err("The target or secret type is invalid.");
             }
         }
         let path = self.root.join("shared/config.json");
         let on_disk = match fs::read(&path) {
             Ok(bytes) => Some(bytes),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(_) => return Err("Yapılandırma okunamadı"),
+            Err(_) => return Err("Could not read the configuration."),
         };
         if on_disk != self.config_bytes {
-            return Err("Yapılandırma başka bir süreçte değişti; pencereyi yeniden açın");
+            return Err(
+                "Configuration changed in another process. Reopen this window before saving.",
+            );
         }
         let changed: Vec<String> = self
             .engine
@@ -362,7 +370,7 @@ impl DesktopApp {
         }
         if self.engine.invalidate_bindings(&changed).is_err() {
             self.schedules = spawn_schedules(&self.runtime, &self.engine);
-            return Err("Eşleme durumu güncellenemedi");
+            return Err("Could not update binding status.");
         }
         let next = match Engine::new(
             config,
@@ -374,12 +382,12 @@ impl DesktopApp {
             Ok(engine) => Arc::new(engine),
             Err(_) => {
                 self.schedules = spawn_schedules(&self.runtime, &self.engine);
-                return Err("Durum dosyası okunamadı");
+                return Err("Could not read the state file.");
             }
         };
         if write_config(&path, &bytes).is_err() {
             self.schedules = spawn_schedules(&self.runtime, &self.engine);
-            return Err("Yapılandırma yazılamadı");
+            return Err("Could not save the configuration.");
         }
         self.config_bytes = Some(bytes);
         self.schedules = spawn_schedules(&self.runtime, &next);
@@ -397,7 +405,7 @@ impl DesktopApp {
         let mut config = self.engine.config.clone();
         if let Some(old_id) = &self.form.original_id {
             let Some(existing) = config.bindings.iter_mut().find(|b| &b.id == old_id) else {
-                self.error("Eşleme bulunamadı");
+                self.error("Binding not found.");
                 return;
             };
             *existing = binding;
@@ -408,7 +416,7 @@ impl DesktopApp {
             Ok(()) => {
                 self.editing = false;
                 self.form = BindingForm::default();
-                self.notice("Eşleme kaydedildi ve zamanlayıcı güncellendi");
+                self.notice("Binding saved. The sync schedule is up to date.");
             }
             Err(e) => self.error(e),
         }
@@ -417,7 +425,7 @@ impl DesktopApp {
         let mut config = self.engine.config.clone();
         config.bindings.retain(|b| b.id != id);
         match self.save_config(config) {
-            Ok(()) => self.notice("Eşleme kaldırıldı"),
+            Ok(()) => self.notice("Binding removed."),
             Err(e) => self.error(e),
         }
     }
@@ -425,9 +433,9 @@ impl DesktopApp {
         let outcome = self.runtime.block_on(self.engine.sync(id));
         match outcome {
             SyncOutcome::Failed(_) => {
-                self.error("Senkronizasyon başarısız; durum ve olayları kontrol edin")
+                self.error("Sync failed. Check the binding status and activity log.")
             }
-            _ => self.notice("Senkronizasyon kontrolü tamamlandı"),
+            _ => self.notice("Sync check complete."),
         }
     }
     fn vault_action(&mut self, action: &'static str) {
@@ -442,9 +450,9 @@ impl DesktopApp {
         };
         self.passphrase.zeroize();
         match result {
-            Ok(()) => self.notice("Kasa işlemi tamamlandı"),
+            Ok(()) => self.notice("Vault operation complete."),
             Err(_) => {
-                self.error("Kasa işlemi başarısız; parola, yol ve kasa durumunu kontrol edin")
+                self.error("Vault operation failed. Check the passphrase, path, and vault status.")
             }
         }
     }
@@ -455,7 +463,7 @@ impl DesktopApp {
             match fs::read(&self.secret_file) {
                 Ok(bytes) => bytes,
                 Err(_) => {
-                    self.error("Sır dosyası okunamadı");
+                    self.error("Could not read the secret file.");
                     return;
                 }
             }
@@ -465,203 +473,272 @@ impl DesktopApp {
         self.secret_text.zeroize();
         self.secret_file.clear();
         match result {
-            Ok(()) => self.notice("Kasa kaydı yeni sürümle kaydedildi"),
-            Err(_) => self.error("Kasa kaydı kaydedilemedi"),
+            Ok(()) => self.notice("Secret saved as a new version."),
+            Err(_) => self.error("Could not save the secret."),
         }
     }
     fn header(&mut self, ui: &mut egui::Ui) {
+        let (title, subtitle) = match self.page {
+            Page::Overview => ("Overview", "A clear view of your local secret workspace."),
+            Page::Vault => ("Vault", "Secure storage. Simple access. Always local."),
+            Page::Bindings => (
+                "Bindings",
+                "Connect your secrets to the places they are needed.",
+            ),
+            Page::Events => (
+                "Activity",
+                "Follow sync results and changes across your workspace.",
+            ),
+            Page::Settings => ("Settings", "Manage your workspace and desktop agent."),
+        };
+        ui.label(
+            RichText::new("WORKSPACE  /  TAR VAULT SYNC")
+                .size(10.0)
+                .strong()
+                .color(MUTED),
+        );
+        ui.add_space(10.0);
         ui.horizontal(|ui| {
-            ui.heading(match self.page {
-                Page::Overview => "Genel Bakış",
-                Page::Vault => "Şifreli Kasa",
-                Page::Bindings => "Eşlemeler",
-                Page::Events => "Olaylar",
-                Page::Settings => "Yönetim",
-            });
+            ui.heading(RichText::new(title).size(30.0).strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let label = if self.source.is_unlocked() {
-                    "● Kasa açık"
-                } else {
-                    "○ Kasa kilitli"
-                };
-                ui.label(RichText::new(label).color(if self.source.is_unlocked() {
-                    ACCENT
-                } else {
-                    MUTED
-                }));
+                let unlocked = self.source.is_unlocked();
+                egui::Frame::group(ui.style())
+                    .fill(if unlocked {
+                        Color32::from_rgb(227, 244, 238)
+                    } else {
+                        CANVAS
+                    })
+                    .stroke(egui::Stroke::NONE)
+                    .corner_radius(20)
+                    .inner_margin(egui::Margin::symmetric(14, 7))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(if unlocked {
+                                "Vault unlocked"
+                            } else {
+                                "Vault locked"
+                            })
+                            .size(12.0)
+                            .strong()
+                            .color(if unlocked {
+                                ACCENT
+                            } else {
+                                MUTED
+                            }),
+                        );
+                    });
             });
         });
-        ui.add_space(15.0);
+        ui.label(RichText::new(subtitle).color(MUTED));
+        ui.add_space(22.0);
         if !self.message.is_empty() {
-            let color = if self.is_error {
-                Color32::from_rgb(255, 166, 166)
-            } else {
-                ACCENT
-            };
-            ui.group(|ui| {
-                ui.label(RichText::new(&self.message).color(color));
-            });
-            ui.add_space(14.0);
+            card(ui)
+                .fill(if self.is_error {
+                    Color32::from_rgb(255, 240, 240)
+                } else {
+                    Color32::from_rgb(231, 246, 240)
+                })
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(RichText::new(&self.message).color(if self.is_error {
+                        DANGER
+                    } else {
+                        ACCENT
+                    }));
+                });
+            ui.add_space(12.0);
         }
     }
     fn overview(&mut self, ui: &mut egui::Ui) {
-        egui::Frame::group(ui.style())
-            .fill(Color32::from_rgb(29, 53, 43))
-            .show(ui, |ui| {
-            ui.set_min_width(690.0);
-            ui.set_min_height(135.0);
-            ui.heading(RichText::new("Sırlarınız kontrolünüzde.").size(29.0).color(ACCENT));
-            ui.label("Kasadaki değerleri yerel hedeflere güvenli biçimde eşleyin. Sır içerikleri arayüzde geri gösterilmez.");
-            ui.add_space(9.0);
-            if ui.button("Yeni eşleme oluştur").clicked() { self.page = Page::Bindings; self.editing = true; self.form = BindingForm::default(); }
-        });
-        ui.add_space(16.0);
+        card(ui).fill(Color32::from_rgb(230, 242, 238)).stroke(egui::Stroke::NONE)
+            .inner_margin(28).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(RichText::new("LOCAL FIRST. ALWAYS IN YOUR CONTROL.").size(10.0).strong().color(ACCENT));
+                ui.add_space(10.0);
+                ui.label(RichText::new("Your secrets. Your workspace.").size(32.0).strong().color(INK));
+                ui.label(RichText::new("Keep your files, containers, and credentials in sync\nwith one encrypted vault on your device.").size(15.0).color(MUTED));
+                ui.add_space(12.0);
+                if primary_button(ui, "Create binding").clicked() {
+                    self.page = Page::Bindings;
+                    self.editing = true;
+                    self.form = BindingForm::default();
+                }
+            });
+        ui.add_space(20.0);
         let state = self.engine.status();
-        ui.horizontal(|ui| {
-            ui.group(|ui| {
-                ui.set_min_width(150.0);
-                ui.set_min_height(76.0);
-                ui.label("EŞLEME");
-                ui.heading(self.engine.config.bindings.len().to_string());
-            });
-            ui.group(|ui| {
-                ui.set_min_width(150.0);
-                ui.set_min_height(76.0);
-                ui.label("KASA");
-                ui.heading(if self.source.is_unlocked() {
-                    "Açık"
-                } else {
-                    "Kilitli"
-                });
-            });
-            ui.group(|ui| {
-                ui.set_min_width(185.0);
-                ui.set_min_height(76.0);
-                ui.label("DİKKAT GEREKTİREN");
-                let count = self
-                    .engine
-                    .config
-                    .bindings
-                    .iter()
-                    .filter(|binding| {
-                        state.disabled.contains(&binding.id)
-                            || state.status.get(&binding.id).is_some_and(|s| {
-                                matches!(
-                                    s.outcome,
-                                    SyncOutcome::Failed(_) | SyncOutcome::RestartRequired
-                                )
-                            })
+        let attention = self
+            .engine
+            .config
+            .bindings
+            .iter()
+            .filter(|binding| {
+                state.disabled.contains(&binding.id)
+                    || state.status.get(&binding.id).is_some_and(|s| {
+                        matches!(
+                            s.outcome,
+                            SyncOutcome::Failed(_) | SyncOutcome::RestartRequired
+                        )
                     })
-                    .count();
-                ui.heading(count.to_string());
+            })
+            .count();
+        ui.columns(3, |columns| {
+            metric(
+                &mut columns[0],
+                "SYNC BINDINGS",
+                &self.engine.config.bindings.len().to_string(),
+                "Connected local targets",
+                INK,
+            );
+            metric(
+                &mut columns[1],
+                "VAULT STATUS",
+                if self.source.is_unlocked() {
+                    "Unlocked"
+                } else {
+                    "Locked"
+                },
+                if self.source.is_unlocked() {
+                    "Ready to sync"
+                } else {
+                    "Unlock to access secrets"
+                },
+                ACCENT,
+            );
+            metric(
+                &mut columns[2],
+                "NEEDS ATTENTION",
+                &attention.to_string(),
+                "Errors or pending restarts",
+                if attention == 0 { INK } else { DANGER },
+            );
+        });
+        ui.add_space(24.0);
+        ui.horizontal(|ui| {
+            ui.heading("Binding health");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.link("View all bindings").clicked() {
+                    self.page = Page::Bindings;
+                }
             });
         });
-        ui.add_space(22.0);
-        ui.heading("Eşleme durumu");
-        ui.separator();
-        if self.engine.config.bindings.is_empty() {
-            ui.label(
-                RichText::new("Henüz eşleme yok. Önce bir kasa kaydı, ardından eşleme oluşturun.")
-                    .color(MUTED),
-            );
-        }
-        for binding in &self.engine.config.bindings {
-            let outcome = state
-                .status
-                .get(&binding.id)
-                .map(|s| format!("{:?}", s.outcome))
-                .unwrap_or_else(|| "Bekliyor".into());
-            ui.horizontal(|ui| {
-                ui.strong(&binding.id);
+        ui.add_space(8.0);
+        card(ui).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            if self.engine.config.bindings.is_empty() {
+                ui.add_space(8.0);
+                ui.strong("Start with your first secret");
                 ui.label(
-                    RichText::new(format!(
-                        "{} / {}",
-                        binding.source.entry,
-                        target_label(&binding.target)
-                    ))
+                    RichText::new(
+                        "Create or unlock your vault, add a secret, then connect a local target.",
+                    )
                     .color(MUTED),
                 );
-                ui.label(outcome);
-            });
-            ui.separator();
-        }
+                ui.add_space(8.0);
+                if ui.button("Open vault").clicked() {
+                    self.page = Page::Vault;
+                }
+                ui.add_space(8.0);
+            } else {
+                egui::Grid::new("binding_health")
+                    .num_columns(3)
+                    .spacing([30.0, 16.0])
+                    .show(ui, |ui| {
+                        for label in ["BINDING", "TARGET", "STATUS"] {
+                            ui.label(RichText::new(label).size(10.0).strong().color(MUTED));
+                        }
+                        ui.end_row();
+                        for binding in &self.engine.config.bindings {
+                            ui.strong(&binding.id);
+                            ui.label(target_label(&binding.target));
+                            let outcome = if state.disabled.contains(&binding.id) {
+                                "Disabled".into()
+                            } else {
+                                state
+                                    .status
+                                    .get(&binding.id)
+                                    .map(|s| outcome_label(&s.outcome).to_owned())
+                                    .unwrap_or_else(|| "Pending".into())
+                            };
+                            ui.label(outcome);
+                            ui.end_row();
+                        }
+                    });
+            }
+        });
     }
     fn vault(&mut self, ui: &mut egui::Ui) {
-        ui.label(RichText::new("Parola ve sır değerleri yalnızca geçici bellekte işlenir. 15 dakika kullanılmayan kasa kilitlenir.").color(MUTED));
+        ui.label(RichText::new("Manage encrypted secrets and backups. Your vault locks after 15 minutes of inactivity.").color(MUTED));
         ui.add_space(14.0);
-        ui.group(|ui| {
-            ui.heading("Kasa erişimi");
+        card(ui).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.heading("Vault access");
+            secret_field(ui, "Passphrase", &mut self.passphrase);
             ui.horizontal(|ui| {
-                ui.label("Kasa parolası");
-                ui.add(
-                    egui::TextEdit::singleline(&mut *self.passphrase)
-                        .password(true)
-                        .desired_width(300.0),
-                );
-            });
-            ui.horizontal(|ui| {
-                if !self.source.exists() && ui.button("Kasa oluştur").clicked() {
+                if !self.source.exists() && primary_button(ui, "Create vault").clicked() {
                     self.vault_action("create");
                 }
-                if self.source.exists() && ui.button("Kilidi aç").clicked() {
+                if self.source.exists() && primary_button(ui, "Unlock vault").clicked() {
                     self.vault_action("unlock");
                 }
-                if ui.button("Kilitle").clicked() {
+                if ui.button("Lock vault").clicked() {
                     self.source.lock();
                     self.passphrase.zeroize();
-                    self.notice("Kasa kilitlendi");
+                    self.notice("Vault locked.");
                 }
             });
         });
         ui.add_space(12.0);
-        ui.group(|ui| {
-            ui.heading("Şifreli yedek");
+        card(ui).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.heading("Encrypted backup");
+            field(ui, "Backup file path", &mut self.backup_path);
             ui.horizontal(|ui| {
-                ui.label("Yedek dosyası yolu");
-                ui.add(egui::TextEdit::singleline(&mut self.backup_path).desired_width(420.0));
-            });
-            ui.horizontal(|ui| {
-                if ui.button("Yedek oluştur").clicked() {
+                if ui.button("Create backup").clicked() {
                     match self.source.backup(&PathBuf::from(&self.backup_path)) {
-                        Ok(()) => self.notice("Şifreli yedek oluşturuldu"),
-                        Err(_) => self.error("Yedek oluşturulamadı"),
+                        Ok(()) => self.notice("Encrypted backup created."),
+                        Err(_) => self.error("Could not create the backup."),
                     }
                 }
-                if ui.button("Yedekten kurtar").clicked() {
+                if ui.button("Restore backup").clicked() {
                     self.vault_action("recover");
                 }
             });
-            ui.label(RichText::new("Kurtarma mevcut kasanın üzerine yazmaz.").color(MUTED));
+            ui.label(
+                RichText::new("Restore is available only when no vault exists in this workspace.")
+                    .color(MUTED),
+            );
         });
         ui.add_space(17.0);
-        ui.heading("Kasa kayıtları");
+        ui.heading("Saved secrets");
         ui.separator();
         match self.source.entries() {
             Ok(entries) if entries.is_empty() => {
-                ui.label(RichText::new("Kasa boş.").color(MUTED));
+                ui.label(
+                    RichText::new("No secrets yet. Add your first secret below.").color(MUTED),
+                );
             }
             Ok(entries) => {
                 let mut remove = None;
                 for entry in entries {
                     ui.horizontal(|ui| {
                         ui.strong(&entry.id);
-                        ui.label(format!("{:?}", entry.kind));
+                        ui.label(secret_type_label(&entry.kind));
                         ui.label(
                             RichText::new(format!(
-                                "sürüm {}",
+                                "Version {}",
                                 &entry.version[..8.min(entry.version.len())]
                             ))
                             .color(MUTED),
                         );
                         if self.pending_delete_entry.as_deref() == Some(entry.id.as_str()) {
-                            ui.label(RichText::new("Silinsin mi?").color(Color32::LIGHT_RED));
-                            if ui.button("Evet, sil").clicked() {
+                            ui.label(RichText::new("Remove this item?").color(DANGER));
+                            if ui.button("Confirm removal").clicked() {
                                 remove = Some(entry.id.clone());
                             }
-                            if ui.button("Vazgeç").clicked() {
+                            if ui.button("Cancel").clicked() {
                                 self.pending_delete_entry = None;
                             }
-                        } else if ui.button("Kaldır").clicked() {
+                        } else if ui.button("Remove").clicked() {
                             self.pending_delete_entry = Some(entry.id.clone());
                         }
                     });
@@ -670,40 +747,53 @@ impl DesktopApp {
                 if let Some(id) = remove {
                     self.pending_delete_entry = None;
                     match self.source.remove_entry(&id) {
-                        Ok(()) => self.notice("Kasa kaydı kaldırıldı"),
-                        Err(_) => self.error("Kasa kaydı kaldırılamadı"),
+                        Ok(()) => self.notice("Secret removed."),
+                        Err(_) => self.error("Could not remove the secret."),
                     }
                 }
             }
             Err(_) => {
-                ui.label(RichText::new("Kayıtları görmek için kasayı açın.").color(MUTED));
+                ui.label(
+                    RichText::new("Unlock your vault to view saved secret names.").color(MUTED),
+                );
             }
         }
         ui.add_space(16.0);
-        ui.group(|ui| {
-            ui.heading("Sır ekle veya döndür");
-            field(ui, "Kayıt kimliği", &mut self.entry_id);
-            secret_type_combo(ui, "Sır türü", &mut self.entry_kind);
-            ui.horizontal(|ui| { ui.label("Sır değeri"); ui.add(egui::TextEdit::singleline(&mut *self.secret_text).password(true).desired_width(390.0)); });
-            ui.label(RichText::new("Çok satırlı veya ikili değer için dosya yolu kullanın; mevcut sır geri gösterilmez.").color(MUTED));
-            field(ui, "Sır dosyası (isteğe bağlı)", &mut self.secret_file);
-            if ui.button("Kasaya kaydet").clicked() { self.put_entry(); }
+        card(ui).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.heading("Add or rotate a secret");
+            field(ui, "Secret ID", &mut self.entry_id);
+            secret_type_combo(ui, "Secret type", &mut self.entry_kind);
+            secret_field(ui, "Secret value", &mut self.secret_text);
+            ui.label(RichText::new("Use a file for multiline or binary values. Saved secret values are never displayed.").color(MUTED));
+            field(ui, "Secret file path (optional)", &mut self.secret_file);
+            if primary_button(ui, "Save secret").clicked() { self.put_entry(); }
         });
     }
     fn bindings(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label(
-                RichText::new(
-                    "Kasa kaydını dosya, Docker girdisi veya Git kimlik bilgisine bağlayın.",
-                )
-                .color(MUTED),
+                RichText::new("Connect a vault secret to a file, Docker input, or Git credential.")
+                    .color(MUTED),
             );
-            if ui.button("+ Yeni eşleme").clicked() {
+            if primary_button(ui, "+ New binding").clicked() {
                 self.form = BindingForm::default();
                 self.editing = true;
             }
         });
         ui.add_space(12.0);
+        if self.engine.config.bindings.is_empty() && !self.editing {
+            card(ui).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.strong("No bindings yet");
+                ui.label(
+                    RichText::new(
+                        "Create a binding to keep a local target in sync with a vault secret.",
+                    )
+                    .color(MUTED),
+                );
+            });
+        }
         let state = self.engine.status();
         let mut edit = None;
         let mut remove = None;
@@ -711,7 +801,8 @@ impl DesktopApp {
         let mut enable = None;
         let mut ack = None;
         for binding in &self.engine.config.bindings {
-            ui.group(|ui| {
+            card(ui).show(ui, |ui| {
+                ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
                     ui.strong(&binding.id);
                     ui.label(
@@ -723,38 +814,38 @@ impl DesktopApp {
                         .color(MUTED),
                     );
                     if state.disabled.contains(&binding.id) {
-                        ui.colored_label(Color32::from_rgb(239, 190, 115), "Devre dışı");
+                        ui.colored_label(Color32::from_rgb(239, 190, 115), "Disabled");
                     } else if let Some(status) = state.status.get(&binding.id) {
-                        ui.label(format!("{:?}", status.outcome));
+                        ui.label(outcome_label(&status.outcome));
                     }
                 });
                 ui.horizontal(|ui| {
-                    if ui.button("Düzenle").clicked() {
+                    if ui.button("Edit").clicked() {
                         edit = Some(binding.clone());
                     }
-                    if ui.button("Şimdi kontrol et").clicked() {
+                    if ui.button("Sync now").clicked() {
                         sync = Some(binding.id.clone());
                     }
-                    if state.disabled.contains(&binding.id) && ui.button("Etkinleştir").clicked() {
+                    if state.disabled.contains(&binding.id) && ui.button("Enable").clicked() {
                         enable = Some(binding.id.clone());
                     }
                     if state
                         .status
                         .get(&binding.id)
                         .is_some_and(|s| s.outcome == SyncOutcome::RestartRequired)
-                        && ui.button("Yeniden başlatmayı onayla").clicked()
+                        && ui.button("Acknowledge restart").clicked()
                     {
                         ack = Some(binding.id.clone());
                     }
                     if self.pending_delete_binding.as_deref() == Some(binding.id.as_str()) {
-                        ui.label(RichText::new("Silinsin mi?").color(Color32::LIGHT_RED));
-                        if ui.button("Evet, sil").clicked() {
+                        ui.label(RichText::new("Remove this item?").color(DANGER));
+                        if ui.button("Confirm removal").clicked() {
                             remove = Some(binding.id.clone());
                         }
-                        if ui.button("Vazgeç").clicked() {
+                        if ui.button("Cancel").clicked() {
                             self.pending_delete_binding = None;
                         }
-                    } else if ui.button("Kaldır").clicked() {
+                    } else if ui.button("Remove").clicked() {
                         self.pending_delete_binding = Some(binding.id.clone());
                     }
                 });
@@ -770,14 +861,14 @@ impl DesktopApp {
         }
         if let Some(id) = enable {
             match self.runtime.block_on(self.engine.enable_binding(&id)) {
-                Ok(()) => self.notice("Eşleme etkinleştirildi"),
-                Err(_) => self.error("Eşleme etkinleştirilemedi"),
+                Ok(()) => self.notice("Binding enabled."),
+                Err(_) => self.error("Could not enable the binding."),
             }
         }
         if let Some(id) = ack {
             match self.runtime.block_on(self.engine.acknowledge_restart(&id)) {
-                Ok(()) => self.notice("Yeniden başlatma onaylandı"),
-                Err(_) => self.error("Onay başarısız"),
+                Ok(()) => self.notice("Restart acknowledged."),
+                Err(_) => self.error("Could not acknowledge the restart."),
             }
         }
         if let Some(id) = remove {
@@ -790,49 +881,73 @@ impl DesktopApp {
         }
     }
     fn binding_editor(&mut self, ui: &mut egui::Ui) {
-        ui.group(|ui| {
-            ui.heading(if self.form.original_id.is_some() { "Eşlemeyi düzenle" } else { "Yeni eşleme" });
-            field(ui, "Eşleme kimliği", &mut self.form.id);
-            field(ui, "Kasa kayıt kimliği", &mut self.form.entry);
-            secret_type_combo(ui, "Sır türü", &mut self.form.secret_type);
-            egui::ComboBox::from_label("Hedef türü").selected_text(self.form.target_kind.label()).show_ui(ui, |ui| {
-                for choice in TargetChoice::ALL { ui.selectable_value(&mut self.form.target_kind, choice, choice.label()); }
-            });
-            if self.form.target_kind == TargetChoice::GitCredential {
-                field(ui, "Git host", &mut self.form.host);
-                field(ui, "Depo yolu (isteğe bağlı)", &mut self.form.git_path);
-                field(ui, "Git kullanıcı adı", &mut self.form.username);
-            } else {
-                field(ui, "Hedef dosyanın mutlak yolu", &mut self.form.path);
-                if self.form.target_kind != TargetChoice::WholeFile { field(ui, "Alan anahtarı (JSON/YAML için /path)", &mut self.form.key); }
-                if self.form.target_kind == TargetChoice::DockerEnvFile {
-                    field(ui, "Compose dosyasının mutlak yolu", &mut self.form.compose_path);
-                    field(ui, "Compose servisi", &mut self.form.service);
+        card(ui).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.heading(if self.form.original_id.is_some() { "Edit binding" } else { "New binding" });
+            ui.label(RichText::new("Choose a secret, a destination, and a sync schedule.").color(MUTED));
+            ui.add_space(12.0);
+            ui.columns(2, |columns| {
+                let ui = &mut columns[0];
+                ui.label(RichText::new("01  SOURCE").size(11.0).strong().color(ACCENT));
+                field(ui, "Binding ID", &mut self.form.id);
+                field(ui, "Vault secret ID", &mut self.form.entry);
+                secret_type_combo(ui, "Secret type", &mut self.form.secret_type);
+                ui.add_space(18.0);
+                ui.label(RichText::new("03  SYNC SCHEDULE").size(11.0).strong().color(ACCENT));
+                field(ui, "Check interval (seconds)", &mut self.form.interval);
+                ui.label(RichText::new("When the target is missing").size(12.0).strong());
+                egui::ComboBox::from_id_salt("missing_target_policy")
+                    .width(ui.available_width())
+                    .selected_text(policy_label(&self.form.policy)).show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.form.policy, MissingTargetPolicy::Alert, "Alert");
+                        ui.selectable_value(&mut self.form.policy, MissingTargetPolicy::Recreate, "Recreate");
+                        ui.selectable_value(&mut self.form.policy, MissingTargetPolicy::Disable, "Disable binding");
+                    });
+                let ui = &mut columns[1];
+                ui.label(RichText::new("02  DESTINATION").size(11.0).strong().color(ACCENT));
+                ui.label(RichText::new("Target type").size(12.0).strong());
+                egui::ComboBox::from_id_salt("target_type")
+                    .width(ui.available_width())
+                    .selected_text(self.form.target_kind.label()).show_ui(ui, |ui| {
+                        for choice in TargetChoice::ALL {
+                            ui.selectable_value(&mut self.form.target_kind, choice, choice.label());
+                        }
+                    });
+                if self.form.target_kind == TargetChoice::GitCredential {
+                    field(ui, "Git host", &mut self.form.host);
+                    field(ui, "Repository path (optional)", &mut self.form.git_path);
+                    field(ui, "Git username", &mut self.form.username);
+                } else {
+                    field(ui, "Absolute target file path", &mut self.form.path);
+                    if self.form.target_kind != TargetChoice::WholeFile {
+                        field(ui, "Field key (use /path for JSON or YAML)", &mut self.form.key);
+                    }
+                    if self.form.target_kind == TargetChoice::DockerEnvFile {
+                        field(ui, "Absolute Compose file path", &mut self.form.compose_path);
+                        field(ui, "Compose service", &mut self.form.service);
+                    }
                 }
-            }
-            egui::ComboBox::from_label("Eksik hedef politikası")
-                .selected_text(policy_label(&self.form.policy)).show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.form.policy, MissingTargetPolicy::Alert, "Uyar");
-                    ui.selectable_value(&mut self.form.policy, MissingTargetPolicy::Recreate, "Yeniden oluştur");
-                    ui.selectable_value(&mut self.form.policy, MissingTargetPolicy::Disable, "Devre dışı bırak");
-                });
-            field(ui, "Kontrol aralığı (saniye)", &mut self.form.interval);
-            ui.label(RichText::new("Dosya yolları çalışma alanı kökü içinde olmalıdır. Git depo yolu için credential.useHttpPath etkin olmalıdır.").color(MUTED));
-            ui.horizontal(|ui| { if ui.button("Eşlemeyi kaydet").clicked() { self.save_binding(); }
-                if ui.button("Vazgeç").clicked() { self.editing = false; } });
+                ui.add_space(8.0);
+                ui.label(RichText::new("File targets must be inside your workspace. Repository-specific Git credentials require credential.useHttpPath.").small().color(MUTED));
+            });
+            ui.add_space(18.0);
+            ui.separator();
+            ui.horizontal(|ui| {
+                if primary_button(ui, "Save binding").clicked() { self.save_binding(); }
+                if ui.button("Cancel").clicked() { self.editing = false; }
+            });
         });
     }
     fn events(&mut self, ui: &mut egui::Ui) {
         ui.label(
-            RichText::new("Olaylar yalnızca kimlik, zaman ve güvenli sonuç kategorilerini içerir.")
-                .color(MUTED),
+            RichText::new("Recent sync events. Secret values are never included.").color(MUTED),
         );
         ui.add_space(10.0);
         let data = match fs::read_to_string(&self.engine.events_path) {
             Ok(data) => data,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(_) => {
-                ui.colored_label(Color32::LIGHT_RED, "Olaylar okunamadı");
+                ui.colored_label(DANGER, "Could not read activity.");
                 return;
             }
         };
@@ -844,38 +959,47 @@ impl DesktopApp {
             .collect();
         match events {
             Ok(events) if events.is_empty() => {
-                ui.label("Henüz olay yok.");
+                card(ui).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.strong("Nothing to report yet");
+                    ui.label(
+                        RichText::new("Your sync history will appear here after the first check.")
+                            .color(MUTED),
+                    );
+                });
             }
             Ok(events) => {
                 for event in events {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(event.timestamp.to_string()).color(MUTED));
                         ui.strong(event.binding_id);
-                        ui.label(format!("{:?}", event.outcome));
+                        ui.label(outcome_label(&event.outcome));
                     });
                     ui.separator();
                 }
             }
             Err(_) => {
-                ui.colored_label(Color32::LIGHT_RED, "Olay kaydı geçersiz");
+                ui.colored_label(DANGER, "An activity record is invalid.");
             }
         }
     }
     fn settings(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Çalışma alanı");
-        ui.label(RichText::new("Hedef dosyalar seçilen kökün içinde olmalıdır.").color(MUTED));
-        field(ui, "Kök klasör", &mut self.root_input);
-        if ui.button("Bu çalışma alanına geç").clicked() {
+        ui.heading("Workspace");
+        ui.label(
+            RichText::new("Choose the workspace that contains your target files.").color(MUTED),
+        );
+        field(ui, "Workspace folder", &mut self.root_input);
+        if primary_button(ui, "Switch workspace").clicked() {
             let requested = PathBuf::from(&self.root_input);
             match requested.canonicalize() {
-                Ok(path) if path == self.root => self.notice("Bu çalışma alanı zaten açık"),
+                Ok(path) if path == self.root => self.notice("This workspace is already open."),
                 Ok(path) if path.is_dir() => {
                     let lock_path = path.join("local/agent.lock");
                     if fs::create_dir_all(path.join("local")).is_err()
                         || core::acquire_agent_lock(&lock_path).is_err()
                     {
                         self.error(
-                            "Çalışma alanı başka bir ajan tarafından kullanılıyor veya yazılamıyor",
+                            "The workspace is in use by another agent or cannot be written.",
                         );
                         return;
                     }
@@ -890,77 +1014,175 @@ impl DesktopApp {
                     if started.is_some() {
                         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                     } else {
-                        self.error("Yeni çalışma alanı açılamadı");
+                        self.error("Could not open the workspace.");
                     }
                 }
-                _ => self.error("Kök klasör bulunamadı"),
+                _ => self.error("Workspace folder not found."),
             }
         }
         ui.add_space(18.0);
-        ui.heading("Yerel yönetim");
-        ui.label("Bu pencere doğrudan çalışan Rust uygulamasına bağlıdır; HTTP sunucusu veya tarayıcı kullanılmaz.");
-        ui.label(
-            "Pencere kapandığında yönetim süreci durur. Ayrı 'agent' modu bağımsız çalışabilir.",
-        );
+        ui.heading("Desktop agent");
+        ui.label("Scheduled sync runs locally while this window is open.");
+        ui.label("For background sync after closing the window, run the separate agent.");
         ui.add_space(18.0);
-        ui.group(|ui| { ui.strong("Geliştirme sürümü");
-            ui.label("Yerel GUI ve çekirdek işlevleri kullanılabilir; paketleme ve üç işletim sistemi üzerinde yerel entegrasyon onayı hâlâ gerekir."); });
+        card(ui).show(ui, |ui| {
+            ui.set_width(ui.available_width()); ui.strong("Development build");
+            ui.label("Native desktop management is available. Release packaging and platform validation are in progress."); });
     }
 }
 
 impl eframe::App for DesktopApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::SidePanel::left("nav")
-            .min_width(185.0)
-            .max_width(185.0)
+            .resizable(false)
+            .exact_width(218.0)
+            .frame(egui::Frame::NONE.fill(NAV).inner_margin(20))
             .show(ctx, |ui| {
-                ui.add_space(15.0);
-                ui.heading(RichText::new("TAR").color(ACCENT));
-                ui.label(RichText::new("VAULT SYNC").small().color(MUTED));
-                ui.add_space(28.0);
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    egui::Frame::NONE
+                        .fill(ACCENT)
+                        .corner_radius(10)
+                        .inner_margin(10)
+                        .show(ui, |ui| {
+                            ui.label(RichText::new("T").size(22.0).strong().color(Color32::WHITE));
+                        });
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new("TAR")
+                                .size(20.0)
+                                .strong()
+                                .color(Color32::WHITE),
+                        );
+                        ui.label(
+                            RichText::new("VAULT SYNC")
+                                .size(10.0)
+                                .color(Color32::from_rgb(149, 172, 191)),
+                        );
+                    });
+                });
+                ui.add_space(38.0);
+                ui.label(
+                    RichText::new("WORKSPACE")
+                        .size(10.0)
+                        .strong()
+                        .color(Color32::from_rgb(121, 144, 165)),
+                );
+                ui.add_space(8.0);
                 for (page, name) in [
-                    (Page::Overview, "Genel Bakış"),
-                    (Page::Vault, "Kasa"),
-                    (Page::Bindings, "Eşlemeler"),
-                    (Page::Events, "Olaylar"),
-                    (Page::Settings, "Yönetim"),
+                    (Page::Overview, "Overview"),
+                    (Page::Vault, "Vault"),
+                    (Page::Bindings, "Bindings"),
+                    (Page::Events, "Activity"),
+                    (Page::Settings, "Settings"),
                 ] {
-                    if ui.selectable_label(self.page == page, name).clicked() {
+                    let selected = self.page == page;
+                    let button =
+                        egui::Button::new(RichText::new(name).size(14.0).color(if selected {
+                            Color32::WHITE
+                        } else {
+                            Color32::from_rgb(168, 186, 202)
+                        }))
+                        .fill(if selected {
+                            Color32::from_rgb(36, 64, 76)
+                        } else {
+                            NAV
+                        })
+                        .stroke(egui::Stroke::NONE)
+                        .corner_radius(8);
+                    if ui.add_sized([ui.available_width(), 42.0], button).clicked() {
                         self.page = page;
                         self.message.clear();
                     }
-                    ui.add_space(6.0);
                 }
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                    ui.label(RichText::new("Yerel ajan çalışıyor").color(ACCENT).small());
+                    ui.label(
+                        RichText::new("Desktop  /  v0.1.0")
+                            .size(10.0)
+                            .color(Color32::from_rgb(121, 144, 165)),
+                    );
+                    ui.label(
+                        RichText::new("Local agent running")
+                            .size(12.0)
+                            .color(Color32::from_rgb(109, 213, 178)),
+                    );
+                    ui.add_space(6.0);
+                    ui.separator();
                 });
             });
-        egui::CentralPanel::default().show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.add_space(8.0);
-                self.header(ui);
-                match self.page {
-                    Page::Overview => self.overview(ui),
-                    Page::Vault => self.vault(ui),
-                    Page::Bindings => self.bindings(ui),
-                    Page::Events => self.events(ui),
-                    Page::Settings => self.settings(ui),
-                }
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::NONE
+                    .fill(CANVAS)
+                    .inner_margin(egui::Margin::symmetric(30, 26)),
+            )
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        self.header(ui);
+                        match self.page {
+                            Page::Overview => self.overview(ui),
+                            Page::Vault => self.vault(ui),
+                            Page::Bindings => self.bindings(ui),
+                            Page::Events => self.events(ui),
+                            Page::Settings => self.settings(ui),
+                        }
+                        ui.add_space(20.0);
+                    });
             });
-        });
         ctx.request_repaint_after(std::time::Duration::from_secs(3));
     }
 }
 
+fn card(ui: &egui::Ui) -> egui::Frame {
+    egui::Frame::group(ui.style())
+        .fill(Color32::WHITE)
+        .stroke(egui::Stroke::new(1.0, BORDER))
+        .corner_radius(12)
+        .inner_margin(20)
+}
+fn primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    ui.add(
+        egui::Button::new(RichText::new(label).strong().color(Color32::WHITE))
+            .fill(ACCENT)
+            .stroke(egui::Stroke::NONE),
+    )
+}
+fn metric(ui: &mut egui::Ui, title: &str, value: &str, detail: &str, color: Color32) {
+    card(ui).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(RichText::new(title).size(10.0).strong().color(MUTED));
+        ui.label(RichText::new(value).size(27.0).strong().color(color));
+        ui.label(RichText::new(detail).size(11.0).color(MUTED));
+    });
+}
 fn field(ui: &mut egui::Ui, label: &str, value: &mut String) {
-    ui.horizontal(|ui| {
-        ui.label(label);
-        ui.add(egui::TextEdit::singleline(value).desired_width(420.0));
+    ui.push_id(label, |ui| {
+        ui.label(RichText::new(label).size(12.0).strong());
+        ui.add(
+            egui::TextEdit::singleline(value)
+                .desired_width(ui.available_width().min(580.0))
+                .margin(egui::vec2(10.0, 9.0)),
+        );
+    });
+}
+fn secret_field(ui: &mut egui::Ui, label: &str, value: &mut String) {
+    ui.push_id(label, |ui| {
+        ui.label(RichText::new(label).size(12.0).strong());
+        ui.add(
+            egui::TextEdit::singleline(value)
+                .password(true)
+                .desired_width(ui.available_width().min(580.0))
+                .margin(egui::vec2(10.0, 9.0)),
+        );
     });
 }
 fn secret_type_combo(ui: &mut egui::Ui, label: &str, kind: &mut SecretType) {
-    egui::ComboBox::from_label(label)
-        .selected_text(format!("{kind:?}"))
+    ui.label(RichText::new(label).size(12.0).strong());
+    egui::ComboBox::from_id_salt(label)
+        .width(240.0)
+        .selected_text(secret_type_label(kind))
         .show_ui(ui, |ui| {
             for choice in [
                 SecretType::Text,
@@ -969,22 +1191,89 @@ fn secret_type_combo(ui: &mut egui::Ui, label: &str, kind: &mut SecretType) {
                 SecretType::Certificate,
                 SecretType::PrivateKey,
             ] {
-                let text = format!("{choice:?}");
+                let text = secret_type_label(&choice);
                 ui.selectable_value(kind, choice, text);
             }
         });
 }
+fn secret_type_label(kind: &SecretType) -> &'static str {
+    match kind {
+        SecretType::Text => "Text",
+        SecretType::Json => "JSON",
+        SecretType::Binary => "Binary",
+        SecretType::Certificate => "Certificate",
+        SecretType::PrivateKey => "Private key",
+    }
+}
+fn configure_theme(ctx: &egui::Context) {
+    let mut style = (*ctx.style()).clone();
+    style.visuals = egui::Visuals::light();
+    style.visuals.override_text_color = Some(INK);
+    style.visuals.panel_fill = CANVAS;
+    style.visuals.window_fill = Color32::WHITE;
+    style.visuals.extreme_bg_color = Color32::from_rgb(248, 250, 252);
+    style.visuals.faint_bg_color = CANVAS;
+    style.visuals.hyperlink_color = ACCENT;
+    style.visuals.selection.bg_fill = Color32::from_rgb(200, 231, 221);
+    style.visuals.selection.stroke = egui::Stroke::new(1.0, INK);
+    style.visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, BORDER);
+    style.visuals.widgets.inactive.bg_fill = Color32::WHITE;
+    style.visuals.widgets.inactive.weak_bg_fill = Color32::WHITE;
+    style.visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, BORDER);
+    style.visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(7);
+    style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(235, 245, 241);
+    style.visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(235, 245, 241);
+    style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, ACCENT);
+    style.visuals.widgets.active.bg_fill = Color32::from_rgb(215, 237, 228);
+    style.visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, ACCENT);
+    style.spacing.item_spacing = egui::vec2(12.0, 10.0);
+    style.spacing.button_padding = egui::vec2(14.0, 9.0);
+    style.spacing.interact_size.y = 34.0;
+    for (kind, size) in [
+        (egui::TextStyle::Heading, 19.0),
+        (egui::TextStyle::Body, 14.0),
+        (egui::TextStyle::Button, 13.0),
+        (egui::TextStyle::Small, 11.0),
+        (egui::TextStyle::Monospace, 13.0),
+    ] {
+        let family = if kind == egui::TextStyle::Monospace {
+            egui::FontFamily::Monospace
+        } else {
+            egui::FontFamily::Proportional
+        };
+        style
+            .text_styles
+            .insert(kind, egui::FontId::new(size, family));
+    }
+    ctx.set_style(style);
+}
+fn outcome_label(outcome: &SyncOutcome) -> &'static str {
+    match outcome {
+        SyncOutcome::Unchanged => "Up to date",
+        SyncOutcome::Applied => "Synced",
+        SyncOutcome::RestartRequired => "Restart required",
+        SyncOutcome::Disabled => "Disabled",
+        SyncOutcome::Failed(category) => match category {
+            core::ErrorCategory::InvalidConfig => "Invalid configuration",
+            core::ErrorCategory::Source => "Source unavailable",
+            core::ErrorCategory::VersionConflict => "Version conflict",
+            core::ErrorCategory::Target => "Target error",
+            core::ErrorCategory::State => "State error",
+            core::ErrorCategory::Unauthorized => "Access denied",
+        },
+    }
+}
 fn policy_label(policy: &MissingTargetPolicy) -> &'static str {
     match policy {
-        MissingTargetPolicy::Alert => "Uyar",
-        MissingTargetPolicy::Recreate => "Yeniden oluştur",
-        MissingTargetPolicy::Disable => "Devre dışı bırak",
+        MissingTargetPolicy::Alert => "Alert",
+        MissingTargetPolicy::Recreate => "Recreate",
+        MissingTargetPolicy::Disable => "Disable binding",
     }
 }
 fn target_label(target: &TargetSpec) -> &'static str {
     match target {
-        TargetSpec::WholeFile { .. } => "Dosya",
-        TargetSpec::StructuredField { .. } => "Alan",
+        TargetSpec::WholeFile { .. } => "File",
+        TargetSpec::StructuredField { .. } => "Field",
         TargetSpec::DockerInput { .. } => "Docker",
         TargetSpec::GitCredential { .. } => "Git",
         TargetSpec::Fake { .. } => "Fake",
@@ -1024,7 +1313,7 @@ pub fn run(root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let app = DesktopApp::new(root)?;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1160.0, 760.0])
+            .with_inner_size([1240.0, 840.0])
             .with_min_inner_size([900.0, 600.0]),
         ..Default::default()
     };
@@ -1032,11 +1321,7 @@ pub fn run(root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         "TAR Vault Sync",
         options,
         Box::new(move |cc| {
-            cc.egui_ctx.set_pixels_per_point(1.12);
-            let mut visuals = egui::Visuals::dark();
-            visuals.widgets.active.bg_fill = ACCENT;
-            visuals.selection.bg_fill = Color32::from_rgb(63, 90, 61);
-            cc.egui_ctx.set_visuals(visuals);
+            configure_theme(&cc.egui_ctx);
             Ok(Box::new(app))
         }),
     )?;
