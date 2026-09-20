@@ -368,7 +368,11 @@ pub fn validate_config(data: &[u8], root: &Path) -> Result<Config, ErrorCategory
         if matches!(b.source.store, StoreKind::Fake) != matches!(b.target, TargetSpec::Fake { .. })
             || !matches!(
                 b.source.store,
-                StoreKind::Fake | StoreKind::LocalVault | StoreKind::Azure
+                StoreKind::Fake
+                    | StoreKind::LocalVault
+                    | StoreKind::Azure
+                    | StoreKind::OneDrive
+                    | StoreKind::GoogleDrive
             )
         {
             return Err(ErrorCategory::InvalidConfig);

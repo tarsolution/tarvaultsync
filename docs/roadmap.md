@@ -2,7 +2,7 @@
 
 TAR Vault Sync will be built in the following order. Each phase should deliver a usable vertical slice with focused tests and documentation. Connector and sync modules own their configuration UI; the core provides only the contracts and host surface for those screens.
 
-Phase 1 is complete for the fake-module test host described below. Phases 2–7 and the limited Azure slice in phase 10 have development implementations; [phase 2–5 QA](qa-phase2-5.md) records earlier verified behavior and native release gates. Phases 8–9 and 11–13 remain planned. [Requirements](requirements.md) define the product and security constraints.
+Phase 1 is complete for the fake-module test host described below. Phases 2–9 and the limited Azure slice in phase 10 have development implementations; [phase 2–5 QA](qa-phase2-5.md) records earlier verified behavior and native release gates. Phases 11–13 remain deferred or planned. [Requirements](requirements.md) define the product and security constraints.
 
 ## 1. Core infrastructure
 
@@ -85,7 +85,7 @@ Phase 1 is complete for the fake-module test host described below. Phases 2–7 
 
 ## 8. OneDrive store connector
 
-**Status:** Desktop OAuth application registration prepared. Native authorization, encrypted transport, conflict handling and real two-device acceptance are not yet implemented. Registration alone does not complete this phase.
+**Status:** Native OAuth/PKCE, OS credential storage, selected-folder encrypted vaults, and conditional writes implemented. Windows real-account create/read/rotate/lock/reopen and stale-write rejection passed on 2026-09-20. Two physical-device and macOS/Linux live-account acceptance remain open.
 
 - Store encrypted vault data in the user's OneDrive with revision-aware reads and writes.
 - Detect concurrent edits and present conflicts rather than silently overwriting a vault.
@@ -94,7 +94,7 @@ Phase 1 is complete for the fake-module test host described below. Phases 2–7 
 
 ## 9. Google Drive store connector
 
-**Status:** Desktop OAuth client prepared in the existing Google project; Drive API is enabled. Native authorization, secure credential storage and real sync/conflict acceptance remain open. Existing project-wide consent branding was not modified.
+**Status:** Native OAuth/PKCE with limited Drive Picker access, OS credential storage, revision-pinned downloads, and conditional writes implemented. Windows real-account create/read/rotate/lock/reopen and stale-write rejection passed on 2026-09-20; synthetic files were trashed and temporary credentials removed. Two physical-device and macOS/Linux live-account acceptance remain open. Existing project-wide consent branding was not modified.
 
 - Apply the same encrypted-vault, revision, and conflict contracts to Google Drive.
 

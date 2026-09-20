@@ -1,7 +1,8 @@
 # TAR Vault Sync desktop preview
 
 Native desktop builds for Windows, macOS, and Linux, each in AMD64/x64 and ARM64.
-This is a development preview of the local-vault features, not a claim that every roadmap connector is complete.
+This release candidate includes filesystem, Azure Key Vault, OneDrive, and Google Drive sources.
+It is not a claim that every roadmap connector or production-hardening task is complete.
 
 ## Included
 
@@ -9,6 +10,9 @@ This is a development preview of the local-vault features, not a claim that ever
 - Encrypted local vault, locking, secret rotation, encrypted backup and recovery.
 - File, dotenv, JSON, YAML, properties, Docker input, and Git Credential Manager targets.
 - Scheduled and manual sync with redacted events and explicit restart notices.
+- Native OAuth/PKCE setup for OneDrive and Google Drive encrypted vaults in a selected folder.
+- OS-protected OAuth credentials, revision-pinned Google downloads, and conditional cloud writes.
+- Explicit-consent browser CSV import and Azure public-cloud text-secret sources.
 
 ## Start
 
@@ -31,8 +35,12 @@ CI runs native tests, compiles the release binary, and executes `--version` on a
 Each archive has a SHA-256 checksum in `SHA256SUMS`. Checksums detect corruption; they are not publisher signatures.
 These archives are not code-signed or notarized and are not installers.
 
-Explicit-consent browser CSV import and an Azure public-cloud text-secret desktop connector are in development.
-Azure requires an existing Azure CLI sign-in; native embedded sign-in and cross-platform cloud acceptance remain open.
-OneDrive/Google Drive encrypted-vault synchronization, AWS/Google secret sources, and a Git-backed vault remain roadmap work.
+Windows real-account OneDrive and Google Drive tests passed: encrypted create/read/update,
+stale-write rejection, lock/reopen, and test-file cleanup. Live OAuth acceptance on macOS
+and Linux remains unverified; CI native tests are not a substitute for those account tests.
+Linux OAuth storage requires an unlocked Secret Service keyring. Google setup requires
+the configured desktop OAuth client's secret in the masked field; it is never bundled.
+Azure requires an existing Azure CLI sign-in; native embedded sign-in remains open.
+AWS/Google secret-manager sources and a Git-backed vault remain roadmap work.
 Signed distribution is not included.
 The independent CLI agent still uses development IPC authentication; the desktop app runs its scheduler while open.

@@ -17,7 +17,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use zeroize::{Zeroize, Zeroizing};
@@ -27,6 +27,16 @@ const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 24;
 const MAX_VAULT_BYTES: u64 = 16 * 1024 * 1024;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+/// A remote store must condition replacement on the revision from its last read.
+/// Callers serialize access through VaultSource's mutex. Bytes are ciphertext only.
+pub(crate) trait CipherStore: Send + Sync {
+    fn read(&self) -> Result<Vec<u8>, VaultError>;
+    fn replace(&self, bytes: &[u8]) -> Result<(), VaultError>;
+    fn disconnect(&self) -> Result<(), VaultError> {
+        Err(VaultError::InvalidInput)
+    }
+}
 
 /// Errors never contain a password, path, entry ID, or secret value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,14 +71,14 @@ impl std::fmt::Display for VaultError {
 }
 impl std::error::Error for VaultError {}
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct EntryMeta {
     kind: SecretType,
     version: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct Manifest {
     version: u32,
@@ -104,6 +114,7 @@ struct EnvelopeRef<'a> {
 /// A vault stays unlocked only in this process and locks after 15 idle minutes.
 pub struct LocalVault {
     path: PathBuf,
+    remote: Option<Arc<dyn CipherStore>>,
     salt: [u8; SALT_LEN],
     key: Zeroizing<[u8; 32]>,
     manifest: Manifest,
@@ -125,6 +136,7 @@ impl LocalVault {
         let key = derive_key(passphrase, &salt)?;
         let vault = Self {
             path: path.to_path_buf(),
+            remote: None,
             salt,
             key,
             manifest: Manifest {
@@ -140,11 +152,27 @@ impl LocalVault {
 
     pub fn unlock(path: &Path, passphrase: &str) -> Result<Self, VaultError> {
         let data = read_limited(path)?;
-        let envelope = parse_envelope(&data)?;
+        Self::open_bytes(path, passphrase, &data, None)
+    }
+
+    fn open_bytes(
+        path: &Path,
+        passphrase: &str,
+        data: &[u8],
+        remote: Option<Arc<dyn CipherStore>>,
+    ) -> Result<Self, VaultError> {
+        if data.len() as u64 > MAX_VAULT_BYTES || passphrase.len() > 4096 {
+            return Err(VaultError::InvalidInput);
+        }
+        let envelope = parse_envelope(data)?;
         let key = derive_key(passphrase, &envelope.salt)?;
         let manifest = open_manifest(&envelope, &key)?;
+        if remote.is_some() {
+            verify_all(data, &key)?;
+        }
         Ok(Self {
             path: path.to_path_buf(),
+            remote,
             salt: envelope.salt,
             key,
             manifest,
@@ -166,7 +194,7 @@ impl LocalVault {
             return Err(VaultError::InvalidInput);
         }
         let _write_lock = lock_for_update(&self.path)?;
-        self.reload()?;
+        self.reload_inner(true)?;
         let version = loop {
             let mut random = [0u8; 16];
             OsRng.fill_bytes(&mut random);
@@ -204,7 +232,7 @@ impl LocalVault {
     pub fn remove(&mut self, entry_id: &str) -> Result<(), VaultError> {
         self.touch()?;
         let _write_lock = lock_for_update(&self.path)?;
-        self.reload()?;
+        self.reload_inner(true)?;
         let old = self
             .manifest
             .entries
@@ -229,7 +257,7 @@ impl LocalVault {
     ) -> Result<(), VaultError> {
         self.touch()?;
         let _write_lock = lock_for_update(&self.path)?;
-        self.reload()?;
+        self.reload_inner(true)?;
         let mut ids = std::collections::BTreeSet::new();
         let mut pending = Vec::new();
         let mut versions = std::collections::BTreeSet::new();
@@ -291,7 +319,10 @@ impl LocalVault {
 
     pub fn entries(&mut self) -> Result<Vec<VaultEntry>, VaultError> {
         self.check_active()?;
-        self.reload()?;
+        // Drawing the native UI must not issue a network request every frame.
+        if self.remote.is_none() {
+            self.reload()?;
+        }
         Ok(self
             .manifest
             .entries
@@ -330,7 +361,7 @@ impl LocalVault {
         if self.path == destination || destination.exists() {
             return Err(VaultError::AlreadyExists);
         }
-        let data = read_limited(&self.path)?;
+        let data = self.read_ciphertext()?;
         verify_all(&data, &self.key)?;
         create_new_synced(destination, &data)
     }
@@ -369,15 +400,29 @@ impl LocalVault {
     }
 
     fn reload(&mut self) -> Result<(), VaultError> {
-        let data = read_limited(&self.path)?;
+        self.reload_inner(false)
+    }
+
+    fn reload_inner(&mut self, reject_remote_changes: bool) -> Result<(), VaultError> {
+        let data = self.read_ciphertext()?;
         let envelope = parse_envelope(&data)?;
         if envelope.salt != self.salt {
             return Err(VaultError::AuthenticationOrCorrupt);
         }
         let manifest = open_manifest(&envelope, &self.key)?;
+        if self.remote.is_some() && reject_remote_changes && manifest != self.manifest {
+            return Err(VaultError::VersionConflict);
+        }
         self.manifest = manifest;
         self.sealed = envelope.sealed;
         Ok(())
+    }
+
+    fn read_ciphertext(&self) -> Result<Vec<u8>, VaultError> {
+        match &self.remote {
+            Some(remote) => remote.read(),
+            None => read_limited(&self.path),
+        }
     }
 
     fn persist(&self, create: bool) -> Result<(), VaultError> {
@@ -410,7 +455,12 @@ impl LocalVault {
         let mut output = Vec::with_capacity(MAGIC.len() + encoded.len());
         output.extend_from_slice(MAGIC);
         output.extend_from_slice(&encoded);
-        if create {
+        if let Some(remote) = &self.remote {
+            if create {
+                return Err(VaultError::AlreadyExists);
+            }
+            remote.replace(&output)
+        } else if create {
             create_new_synced(&self.path, &output)
         } else {
             atomic_replace(&self.path, &output)
@@ -658,6 +708,7 @@ pub struct VaultSource {
     vault: Mutex<Option<LocalVault>>,
     path: PathBuf,
     connection: String,
+    remote: Option<Arc<dyn CipherStore>>,
 }
 #[derive(Serialize)]
 pub struct VaultEntry {
@@ -674,28 +725,56 @@ impl VaultSource {
             vault: Mutex::new(None),
             path,
             connection,
+            remote: None,
         })
     }
+    pub(crate) fn remote(
+        path: PathBuf,
+        connection: String,
+        remote: Arc<dyn CipherStore>,
+    ) -> Result<Self, VaultError> {
+        let mut source = Self::new(path, connection)?;
+        source.remote = Some(remote);
+        Ok(source)
+    }
     pub fn unlock(&self, passphrase: &str) -> Result<(), VaultError> {
-        let opened = LocalVault::unlock(&self.path, passphrase)?;
-        *self.vault.lock().map_err(|_| VaultError::Locked)? = Some(opened);
+        let mut guard = self.vault.lock().map_err(|_| VaultError::Locked)?;
+        let opened = match &self.remote {
+            Some(remote) => LocalVault::open_bytes(
+                &self.path,
+                passphrase,
+                &remote.read()?,
+                Some(remote.clone()),
+            )?,
+            None => LocalVault::unlock(&self.path, passphrase)?,
+        };
+        *guard = Some(opened);
         Ok(())
     }
     pub fn create(&self, passphrase: &str) -> Result<(), VaultError> {
+        if self.remote.is_some() {
+            return Err(VaultError::AlreadyExists);
+        }
         let created = LocalVault::create(&self.path, passphrase)?;
         *self.vault.lock().map_err(|_| VaultError::Locked)? = Some(created);
         Ok(())
     }
     pub fn recover(&self, backup: &Path, passphrase: &str) -> Result<(), VaultError> {
+        if self.remote.is_some() {
+            return Err(VaultError::AlreadyExists);
+        }
         let recovered = LocalVault::recover(backup, &self.path, passphrase)?;
         *self.vault.lock().map_err(|_| VaultError::Locked)? = Some(recovered);
         Ok(())
     }
     pub fn exists(&self) -> bool {
-        self.path.exists()
+        self.remote.is_some() || self.path.exists()
+    }
+    pub(crate) fn is_remote(&self) -> bool {
+        self.remote.is_some()
     }
     pub fn is_unlocked(&self) -> bool {
-        self.vault.lock().is_ok_and(|mut guard| {
+        self.vault.try_lock().is_ok_and(|mut guard| {
             if guard
                 .as_mut()
                 .is_some_and(|vault| vault.check_active().is_ok())
@@ -708,7 +787,8 @@ impl VaultSource {
         })
     }
     pub fn entries(&self) -> Result<Vec<VaultEntry>, VaultError> {
-        self.with_open(LocalVault::entries)
+        let mut guard = self.vault.try_lock().map_err(|_| VaultError::Locked)?;
+        guard.as_mut().ok_or(VaultError::Locked)?.entries()
     }
     pub fn put_entry(&self, id: &str, payload: &SecretPayload) -> Result<(), VaultError> {
         self.with_open(|vault| vault.put(id, payload).map(|_| ()))
@@ -741,6 +821,14 @@ impl VaultSource {
         if let Ok(mut guard) = self.vault.lock() {
             *guard = None;
         }
+    }
+    pub(crate) fn disconnect(&self) -> Result<(), VaultError> {
+        let mut guard = self.vault.lock().map_err(|_| VaultError::Locked)?;
+        *guard = None;
+        self.remote
+            .as_ref()
+            .ok_or(VaultError::InvalidInput)?
+            .disconnect()
     }
     fn with_vault<T>(
         &self,
@@ -815,6 +903,96 @@ impl SettingsScreen for VaultStoreScreen {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct MemoryCloud {
+        bytes: Mutex<Vec<u8>>,
+        reject_write: std::sync::atomic::AtomicBool,
+    }
+    impl CipherStore for MemoryCloud {
+        fn read(&self) -> Result<Vec<u8>, VaultError> {
+            Ok(self.bytes.lock().unwrap().clone())
+        }
+        fn replace(&self, bytes: &[u8]) -> Result<(), VaultError> {
+            if self.reject_write.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(VaultError::VersionConflict);
+            }
+            *self.bytes.lock().unwrap() = bytes.to_vec();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn cloud_vault_authenticates_rotates_and_preserves_state_on_conflict() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let initial = dir.path().join("initial.bin");
+        let mut seed = LocalVault::create(&initial, "synthetic-passphrase").unwrap();
+        seed.put("sample", &SecretPayload::new(vec![1], SecretType::Binary))
+            .unwrap();
+        let cloud = Arc::new(MemoryCloud {
+            bytes: Mutex::new(fs::read(&initial).unwrap()),
+            reject_write: AtomicBool::new(false),
+        });
+        let cache_path = dir.path().join("not-persisted.bin");
+        let source =
+            VaultSource::remote(cache_path.clone(), "cloud".into(), cloud.clone()).unwrap();
+        assert!(source.unlock("incorrect-passphrase").is_err());
+        source.unlock("synthetic-passphrase").unwrap();
+        let reference = SourceRef {
+            store: StoreKind::LocalVault,
+            connection: "cloud".into(),
+            entry: "sample".into(),
+        };
+        let old = source.get_version(&reference).unwrap();
+        cloud.reject_write.store(true, Ordering::SeqCst);
+        let original = cloud.bytes.lock().unwrap().clone();
+        assert!(matches!(
+            source.put_entry("sample", &SecretPayload::new(vec![2], SecretType::Binary)),
+            Err(VaultError::VersionConflict)
+        ));
+        assert_eq!(*cloud.bytes.lock().unwrap(), original);
+        assert_eq!(source.get_version(&reference).unwrap(), old);
+        cloud.reject_write.store(false, Ordering::SeqCst);
+        source
+            .put_entry("sample", &SecretPayload::new(vec![3], SecretType::Binary))
+            .unwrap();
+        let current = source.get_version(&reference).unwrap();
+        assert_ne!(current, old);
+        assert!(matches!(
+            source.get_value(&reference, &old),
+            Err(ErrorCategory::VersionConflict)
+        ));
+        assert_eq!(
+            source.get_value(&reference, &current).unwrap().as_bytes(),
+            &[3]
+        );
+        assert!(
+            !cache_path.exists(),
+            "Cloud ciphertext must not be persisted as a local cache"
+        );
+        source.lock();
+        assert!(source.get_version(&reference).is_err());
+        source.unlock("synthetic-passphrase").unwrap();
+        // A second writer changes the authenticated manifest before an edit starts.
+        seed.put("another", &SecretPayload::new(vec![4], SecretType::Binary))
+            .unwrap();
+        *cloud.bytes.lock().unwrap() = fs::read(&initial).unwrap();
+        assert!(matches!(
+            source.put_entry("sample", &SecretPayload::new(vec![5], SecretType::Binary)),
+            Err(VaultError::VersionConflict)
+        ));
+        source.unlock("synthetic-passphrase").unwrap();
+        source
+            .put_entry("sample", &SecretPayload::new(vec![6], SecretType::Binary))
+            .unwrap();
+        // Tampered cloud payloads fail authentication without delivering plaintext.
+        let mut envelope = parse_envelope(&cloud.bytes.lock().unwrap()).unwrap();
+        envelope.manifest_ciphertext[0] ^= 1;
+        let mut damaged = MAGIC.to_vec();
+        damaged.extend(serde_json::to_vec(&envelope).unwrap());
+        *cloud.bytes.lock().unwrap() = damaged;
+        assert!(source.get_version(&reference).is_err());
+    }
 
     #[test]
     fn roundtrip_rotation_and_recovery() {

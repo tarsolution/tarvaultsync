@@ -239,6 +239,7 @@ impl BindingForm {
 struct DesktopApp {
     brand_texture: Option<egui::TextureHandle>,
     pending_sync: Option<JoinHandle<SyncOutcome>>,
+    pending_vault: Option<JoinHandle<Result<String, String>>>,
     root: PathBuf,
     source: Arc<VaultSource>,
     sources: Arc<Sources>,
@@ -246,6 +247,7 @@ struct DesktopApp {
     connection_id: String,
     connection_path: String,
     connection_azure: bool,
+    drive_form: crate::drive_ui::DriveForm,
     target: Arc<ProductionTarget>,
     engine: Arc<Engine>,
     runtime: tokio::runtime::Runtime,
@@ -311,6 +313,7 @@ impl DesktopApp {
         Ok(Self {
             brand_texture: None,
             pending_sync: None,
+            pending_vault: None,
             root_input: root.display().to_string(),
             root,
             source,
@@ -319,6 +322,7 @@ impl DesktopApp {
             connection_id: String::new(),
             connection_path: String::new(),
             connection_azure: false,
+            drive_form: crate::drive_ui::DriveForm::default(),
             target,
             engine,
             runtime,
@@ -468,20 +472,37 @@ impl DesktopApp {
         self.notice("Sync check running…");
     }
     fn vault_action(&mut self, action: &'static str) {
-        let passphrase = self.passphrase.as_str();
-        let result = match action {
-            "create" => self.source.create(passphrase),
-            "unlock" => self.source.unlock(passphrase),
-            "recover" => self
-                .source
-                .recover(&PathBuf::from(&self.backup_path), passphrase),
-            _ => return,
-        };
-        self.passphrase.zeroize();
-        match result {
-            Ok(()) => self.notice("Vault operation complete."),
-            Err(_) => {
-                self.error("Vault operation failed. Check the passphrase, path, and vault status.")
+        let passphrase = Zeroizing::new(std::mem::take(&mut *self.passphrase));
+        let backup = PathBuf::from(&self.backup_path);
+        self.run_vault(move |source| {
+            match action {
+                "create" => source.create(&passphrase),
+                "unlock" => source.unlock(&passphrase),
+                "recover" => source.recover(&backup, &passphrase),
+                _ => return Err("Unknown vault operation.".into()),
+            }
+            .map(|_| "Vault operation complete.".into())
+            .map_err(|error| {
+                format!("Vault operation failed: {error}. Check account access and passphrase.")
+            })
+        });
+    }
+    fn run_vault(
+        &mut self,
+        action: impl FnOnce(Arc<VaultSource>) -> Result<String, String> + Send + 'static,
+    ) {
+        if self.pending_vault.is_some() {
+            self.notice("A vault operation is already running.");
+            return;
+        }
+        let source = self.source.clone();
+        if source.is_remote() {
+            self.pending_vault = Some(self.runtime.spawn_blocking(move || action(source)));
+            self.notice("Cloud vault operation running…");
+        } else {
+            match action(source) {
+                Ok(message) => self.notice(&message),
+                Err(message) => self.error(&message),
             }
         }
     }
@@ -498,16 +519,23 @@ impl DesktopApp {
             }
         };
         let payload = SecretPayload::new(bytes, self.entry_kind.clone());
-        let result = self.source.put_entry(&self.entry_id, &payload);
+        let id = self.entry_id.clone();
         self.secret_text.zeroize();
         self.secret_file.clear();
-        match result {
-            Ok(()) => self.notice("Secret saved as a new version."),
-            Err(_) => self.error("Could not save the secret."),
-        }
+        self.run_vault(move |source| source.put_entry(&id, &payload)
+            .map(|_| "Secret saved as a new version.".into())
+            .map_err(|error| format!("Could not save the secret: {error}. On conflict, unlock again to reload before retrying.")));
     }
     fn import_browser_csv(&mut self) {
         let consent = std::mem::take(&mut self.import_consent);
+        if self.source.is_remote() {
+            let path = PathBuf::from(&self.import_path);
+            let prefix = self.import_prefix.clone();
+            self.run_vault(move |source| crate::browser_import::import_file(&source, &path, &prefix, consent)
+                .map(|count| format!("Imported {count} encrypted records. The original plaintext CSV was not deleted."))
+                .map_err(str::to_owned));
+            return;
+        }
         match crate::browser_import::import_file(
             &self.source,
             &PathBuf::from(&self.import_path),
@@ -716,6 +744,9 @@ impl DesktopApp {
         });
     }
     fn select_source(&mut self, id: &str) -> Result<(), core::ErrorCategory> {
+        if self.pending_vault.is_some() {
+            return Err(core::ErrorCategory::State);
+        }
         let source = self.sources.file(id)?;
         self.passphrase.zeroize();
         self.secret_text.zeroize();
@@ -732,7 +763,8 @@ impl DesktopApp {
         Ok(())
     }
     fn remove_source(&mut self, id: &str) -> Result<(), core::ErrorCategory> {
-        if self.pending_sync.is_some()
+        if self.pending_vault.is_some()
+            || self.pending_sync.is_some()
             || self
                 .engine
                 .config
@@ -772,7 +804,7 @@ impl DesktopApp {
                     ui.label(path.display().to_string());
                 }
                 ui.horizontal(|ui| {
-                    if connection.location.store() == StoreKind::LocalVault
+                    if connection.location.store() != StoreKind::Azure
                         && ui.button("Manage vault").clicked()
                         && self.select_source(&connection.id).is_err()
                     {
@@ -810,6 +842,12 @@ impl DesktopApp {
                     if used {
                         ui.label("Used by bindings");
                     }
+                    if matches!(connection.location, Location::Drive { .. }) && ui.button("Disconnect account").clicked() {
+                        match self.sources.file(&connection.id).and_then(|source| source.disconnect().map_err(|_| core::ErrorCategory::Unauthorized)) {
+                            Ok(()) => self.notice("Account disconnected and vault locked. Reconnect with the same connection ID and vault file."),
+                            Err(_) => self.error("Could not remove the account credential from the OS store."),
+                        }
+                    }
                 });
             });
             ui.add_space(8.0);
@@ -837,8 +875,26 @@ impl DesktopApp {
                     }
                 }
             }
-            ui.label("Removing a connection never deletes its vault. OneDrive and Google Drive sign-in integration is not available in this build yet.");
+            ui.label("Removing a connection never deletes its vault.");
         });
+        if let Some(connection) = self.drive_form.show(ui) {
+            let existing = self
+                .sources
+                .list()
+                .is_ok_and(|connections| connections.iter().any(|c| c.id == connection.id));
+            let result = if existing {
+                self.sources.reconnect(connection)
+            } else {
+                self.sources.add(connection)
+            };
+            match result {
+                Ok(()) => {
+                    self.drive_form.saved();
+                    self.notice("Cloud vault added. Open Manage vault to unlock it.");
+                }
+                Err(_) => self.error("Could not add cloud connection. Use a unique connection ID."),
+            }
+        }
     }
     fn vault(&mut self, ui: &mut egui::Ui) {
         ui.label(format!("Selected source: {}", self.selected_source));
@@ -869,10 +925,13 @@ impl DesktopApp {
             field(ui, "Backup file path", &mut self.backup_path);
             ui.horizontal(|ui| {
                 if ui.button("Create backup").clicked() {
-                    match self.source.backup(&PathBuf::from(&self.backup_path)) {
-                        Ok(()) => self.notice("Encrypted backup created."),
-                        Err(_) => self.error("Could not create the backup."),
-                    }
+                    let path = PathBuf::from(&self.backup_path);
+                    self.run_vault(move |source| {
+                        source
+                            .backup(&path)
+                            .map(|_| "Encrypted backup created.".into())
+                            .map_err(|error| format!("Could not create backup: {error}"))
+                    });
                 }
                 if ui.button("Restore backup").clicked() {
                     self.vault_action("recover");
@@ -921,10 +980,7 @@ impl DesktopApp {
                 }
                 if let Some(id) = remove {
                     self.pending_delete_entry = None;
-                    match self.source.remove_entry(&id) {
-                        Ok(()) => self.notice("Secret removed."),
-                        Err(_) => self.error("Could not remove the secret."),
-                    }
+                    self.run_vault(move |source| source.remove_entry(&id).map(|_| "Secret removed.".into()).map_err(|error| format!("Could not remove secret: {error}. On conflict, unlock again to reload.")));
                 }
             }
             Err(_) => {
@@ -1092,10 +1148,12 @@ impl DesktopApp {
                 ui.label(RichText::new("01  SOURCE").size(11.0).strong().color(ACCENT));
                 field(ui, "Binding ID", &mut self.form.id);
                 egui::ComboBox::from_id_salt("source_kind")
-                    .selected_text(if self.form.source_kind == StoreKind::Azure { "Azure Key Vault" } else { "Local vault" })
+                    .selected_text(match self.form.source_kind { StoreKind::Azure => "Azure Key Vault", StoreKind::OneDrive => "OneDrive", StoreKind::GoogleDrive => "Google Drive", _ => "Local vault" })
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut self.form.source_kind, StoreKind::LocalVault, "Local vault");
                         ui.selectable_value(&mut self.form.source_kind, StoreKind::Azure, "Azure Key Vault");
+                        ui.selectable_value(&mut self.form.source_kind, StoreKind::OneDrive, "OneDrive");
+                        ui.selectable_value(&mut self.form.source_kind, StoreKind::GoogleDrive, "Google Drive");
                     });
                 if self.form.source_kind == StoreKind::Azure {
                     field(ui, "Azure vault name", &mut self.form.connection);
@@ -1110,9 +1168,9 @@ impl DesktopApp {
                     };
                     egui::ComboBox::from_id_salt("binding_source_connection")
                         .selected_text(&self.form.connection).show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.form.connection, "local".into(), "local (workspace vault)");
+                            if self.form.source_kind == StoreKind::LocalVault { ui.selectable_value(&mut self.form.connection, "local".into(), "local (workspace vault)"); }
                             for connection in connections {
-                                if connection.location.store() == StoreKind::LocalVault {
+                                if connection.location.store() == self.form.source_kind {
                                     ui.selectable_value(&mut self.form.connection, connection.id.clone(), &connection.id);
                                 }
                             }
@@ -1263,6 +1321,20 @@ impl DesktopApp {
 impl eframe::App for DesktopApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if self
+            .pending_vault
+            .as_ref()
+            .is_some_and(JoinHandle::is_finished)
+        {
+            match self.runtime.block_on(self.pending_vault.take().unwrap()) {
+                Ok(Ok(message)) => self.notice(&message),
+                Ok(Err(message)) => self.error(&message),
+                Err(_) => self.error("Vault operation stopped unexpectedly."),
+            }
+        }
+        if self.pending_vault.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        if self
             .pending_sync
             .as_ref()
             .is_some_and(JoinHandle::is_finished)
@@ -1381,7 +1453,11 @@ impl eframe::App for DesktopApp {
                         match self.page {
                             Page::Overview => self.overview(ui),
                             Page::Sources => self.source_connections(ui),
-                            Page::Vault => self.vault(ui),
+                            Page::Vault => {
+                                ui.add_enabled_ui(self.pending_vault.is_none(), |ui| {
+                                    self.vault(ui)
+                                });
+                            }
                             Page::Bindings => self.bindings(ui),
                             Page::Events => self.events(ui),
                             Page::Settings => self.settings(ui),
@@ -1600,6 +1676,55 @@ pub fn run(root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn drive_bindings_persist_reopen_and_reconnect_without_repointing() {
+        use crate::drive::{Provider, RemoteRef};
+        for provider in [Provider::OneDrive, Provider::GoogleDrive] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut app = DesktopApp::new(dir.path().to_path_buf()).unwrap();
+            let connection = Connection {
+                id: "cloud".into(),
+                location: Location::Drive {
+                    remote: RemoteRef {
+                        provider,
+                        credential_id: "synthetic-credential-reference".into(),
+                        file_id: "synthetic-file".into(),
+                    },
+                },
+            };
+            app.sources.add(connection.clone()).unwrap();
+            app.select_source("cloud").unwrap();
+            app.form = BindingForm {
+                id: "cloud-binding".into(),
+                source_kind: provider.store(),
+                connection: "cloud".into(),
+                entry: "sample".into(),
+                path: dir.path().join("target.txt").display().to_string(),
+                ..BindingForm::default()
+            };
+            let mut config = app.engine.config.clone();
+            config.bindings.push(app.form.binding().unwrap());
+            app.save_config(config).unwrap();
+            assert!(app.remove_source("cloud").is_err());
+            let mut replacement = connection;
+            if let Location::Drive { remote } = &mut replacement.location {
+                remote.file_id = "different-file".into();
+            }
+            assert!(app.sources.reconnect(replacement.clone()).is_err());
+            if let Location::Drive { remote } = &mut replacement.location {
+                remote.file_id = "synthetic-file".into();
+                remote.credential_id = "renewed-credential-reference".into();
+            }
+            app.sources.reconnect(replacement).unwrap();
+            drop(app);
+            let reopened = DesktopApp::new(dir.path().to_path_buf()).unwrap();
+            assert_eq!(
+                reopened.engine.config.bindings[0].source.store,
+                provider.store()
+            );
+            assert!(!reopened.sources.file("cloud").unwrap().is_unlocked());
+        }
+    }
     /// Runs only in an isolated Linux virtual display. No real vault or account is opened.
     #[cfg(target_os = "linux")]
     #[test]

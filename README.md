@@ -4,7 +4,7 @@
 
 TAR Vault Sync is a planned local-first agent for keeping development secrets in sync across machines and project files. It is designed to read from Azure Key Vault, Google Secret Manager, or an optional encrypted vault stored in Google Drive or OneDrive, then apply the current values to configured local targets.
 
-**Status:** Roadmap phases 2–5 provide a local encrypted vault, file and Docker renderers, a Git Credential Manager target, and an English native desktop interface. CI targets Windows, macOS, and Linux on AMD64 and ARM64; passing builds are not proof of real-environment integration. Automatic release publishing is disabled. External connectors, production IPC authentication, and real-environment acceptance remain unfinished. See the [release notes](docs/release-notes.md) and [phase 2–5 QA record](docs/qa-phase2-5.md).
+**Status:** The English native desktop supports filesystem vaults, Azure text secrets, and encrypted OneDrive/Google Drive vaults. Windows live-account cloud tests passed. Tag builds publish release candidates only after native tests, builds, smoke checks, and package checksums pass for Windows, macOS, and Linux on AMD64 and ARM64. Production IPC authentication, signing, two-device acceptance, and macOS/Linux live-account acceptance remain open. See the [release notes](docs/release-notes.md) and [phase 2–5 QA record](docs/qa-phase2-5.md).
 
 ## Intended capabilities
 
@@ -23,7 +23,7 @@ The implementation is planned in Rust. Day-to-day development and core tests wil
 
 Run `cargo test --workspace` for the core and phase 2–5 tests. On a machine with a graphical desktop and Rust 1.95 or newer, set `TAR_VAULT_SYNC_DIR` to the workspace root and run `cargo run -- desktop`. The native window manages local-vault creation/unlock/lock, entry rotation/removal, encrypted backup/recovery, typed bindings, sync/status, restart acknowledgement, disabled-binding reactivation, and redacted events. It uses no browser or local HTTP server. The window runs the scheduler while open; the separate `agent` mode remains available for background operation and still uses the development-only `TAR_VAULT_SYNC_TEST_TOKEN` IPC credential. Do not treat that mode as production authentication. CLI vault/config commands remain available; see the [development guide](docs/development.md).
 
-The Settings page can switch to an existing workspace root. Only one writer (`desktop` or `agent`) may own a workspace at a time. CI archives are development test artifacts, not published releases. Release publication requires completed implementation and documented real-environment acceptance. Open the executable without arguments to start the desktop app. Without `TAR_VAULT_SYNC_DIR`, it uses the platform's per-user application-data folder. `--help` and `--version` work without creating a workspace.
+The Settings page can switch to an existing workspace root. Only one writer (`desktop` or `agent`) may own a workspace at a time. Branch CI archives are test artifacts; version tags publish explicitly labelled preview releases. Cloud sign-in alone opens the provider's browser authorization and a temporary loopback callback; the application UI remains native. Open the executable without arguments to start the desktop app. Without `TAR_VAULT_SYNC_DIR`, it uses the platform's per-user application-data folder. `--help` and `--version` work without creating a workspace.
 
 ## Documentation
 

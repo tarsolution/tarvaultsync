@@ -21,18 +21,21 @@ use std::{
 pub(crate) enum Location {
     FileSystem { path: PathBuf },
     AzureKeyVault { vault_name: String },
+    Drive { remote: crate::drive::RemoteRef },
 }
 impl Location {
     pub(crate) fn store(&self) -> StoreKind {
         match self {
             Self::FileSystem { .. } => StoreKind::LocalVault,
             Self::AzureKeyVault { .. } => StoreKind::Azure,
+            Self::Drive { remote } => remote.provider.store(),
         }
     }
     pub(crate) fn label(&self) -> &'static str {
         match self {
             Self::FileSystem { .. } => "File System",
             Self::AzureKeyVault { .. } => "Azure Key Vault",
+            Self::Drive { remote } => remote.provider.label(),
         }
     }
 }
@@ -88,6 +91,12 @@ impl Sources {
                     ),
                 );
             }
+            if let Location::Drive { remote } = &connection.location {
+                files.insert(
+                    connection.id.clone(),
+                    remote_source(root, &connection.id, remote)?,
+                );
+            }
             map.insert(connection.id.clone(), connection);
         }
         Ok(Self {
@@ -131,6 +140,15 @@ impl Sources {
                 VaultSource::new(path.clone(), connection.id.clone())
                     .map_err(|_| ErrorCategory::InvalidConfig)?,
             ))
+        } else if let Location::Drive { remote } = &connection.location {
+            Some(remote_source(
+                self.path
+                    .parent()
+                    .and_then(Path::parent)
+                    .ok_or(ErrorCategory::State)?,
+                &connection.id,
+                remote,
+            )?)
         } else {
             None
         };
@@ -174,6 +192,54 @@ impl Sources {
         }
         Ok(())
     }
+    /// Renew credentials without repointing any existing binding to another vault.
+    pub(crate) fn reconnect(&self, connection: Connection) -> Result<(), ErrorCategory> {
+        validate(&connection)?;
+        let mut connections = self.connections.write().map_err(|_| ErrorCategory::State)?;
+        let old = connections
+            .get(&connection.id)
+            .ok_or(ErrorCategory::InvalidConfig)?;
+        let (Location::Drive { remote: previous }, Location::Drive { remote: next }) =
+            (&old.location, &connection.location)
+        else {
+            return Err(ErrorCategory::InvalidConfig);
+        };
+        if previous.provider != next.provider || previous.file_id != next.file_id {
+            return Err(ErrorCategory::InvalidConfig);
+        }
+        let mut files = self.files.write().map_err(|_| ErrorCategory::State)?;
+        let source = remote_source(
+            self.path
+                .parent()
+                .and_then(Path::parent)
+                .ok_or(ErrorCategory::State)?,
+            &connection.id,
+            next,
+        )?;
+        let updated = connections
+            .values()
+            .map(|c| {
+                if c.id == connection.id {
+                    connection.clone()
+                } else {
+                    c.clone()
+                }
+            })
+            .collect();
+        persist(
+            &self.path,
+            &mut *self.saved_bytes.lock().map_err(|_| ErrorCategory::State)?,
+            &Catalogue {
+                version: 1,
+                connections: updated,
+            },
+        )?;
+        if let Some(old) = files.insert(connection.id.clone(), source) {
+            old.lock();
+        }
+        connections.insert(connection.id.clone(), connection);
+        Ok(())
+    }
     pub(crate) fn validate_ref(&self, source: &SourceRef) -> Result<(), ErrorCategory> {
         let routed = self.routed(source)?;
         match routed.store {
@@ -196,6 +262,13 @@ impl Sources {
                 return Ok(SourceRef {
                     store: StoreKind::Azure,
                     connection: vault_name.clone(),
+                    entry: source.entry.clone(),
+                });
+            }
+            if matches!(connection.location, Location::Drive { .. }) {
+                return Ok(SourceRef {
+                    store: StoreKind::LocalVault,
+                    connection: source.connection.clone(),
                     entry: source.entry.clone(),
                 });
             }
@@ -254,8 +327,25 @@ fn validate(connection: &Connection) -> Result<(), ErrorCategory> {
                 return Err(ErrorCategory::InvalidConfig);
             }
         }
+        Location::Drive { remote } if remote.validate() => {}
+        Location::Drive { .. } => return Err(ErrorCategory::InvalidConfig),
     }
     Ok(())
+}
+fn remote_source(
+    root: &Path,
+    id: &str,
+    remote: &crate::drive::RemoteRef,
+) -> Result<Arc<VaultSource>, ErrorCategory> {
+    let store = crate::drive::RemoteFile::new(remote).map_err(|_| ErrorCategory::InvalidConfig)?;
+    Ok(Arc::new(
+        VaultSource::remote(
+            root.join("local").join(format!("remote-{id}.bin")),
+            id.into(),
+            Arc::new(store),
+        )
+        .map_err(|_| ErrorCategory::InvalidConfig)?,
+    ))
 }
 fn read_catalogue(path: &Path) -> Result<Option<Vec<u8>>, ErrorCategory> {
     if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink() || !m.is_file()) {
