@@ -14,9 +14,15 @@ class GuideParser(HTMLParser):
         self.links = []
         self.scripts = []
         self.images = []
+        self.meta = {}
+        self.icons = []
 
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
+        if tag == "meta":
+            self.meta[attrs.get("property", attrs.get("name"))] = attrs.get("content")
+        if tag == "link" and attrs.get("rel") == "icon":
+            self.icons.append(attrs.get("href"))
         if "id" in attrs:
             self.ids.add(attrs["id"])
         for key in ("href", "src"):
@@ -29,13 +35,32 @@ class GuideParser(HTMLParser):
 
 
 class GuideTests(unittest.TestCase):
+    def test_branding_in_pages_and_catalog_template(self):
+        root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location("catalog", root / "scripts/update-docs-catalog.py")
+        catalog = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(catalog)
+        sources = [(root / "docs" / name).read_text(encoding="utf-8")
+                   for name in ("index.html", "releases.html", "credits.html")]
+        sources.append(catalog.page("Releases", "", "test"))
+        for source in sources:
+            parser = GuideParser()
+            parser.feed(source)
+            self.assertIn("assets/mark.png", parser.icons)
+            self.assertTrue((root / "docs/assets/mark.png").is_file())
+            for key in ("og:image", "twitter:image"):
+                self.assertEqual(parser.meta[key], "https://tarvault.tarsolution.com/assets/mark.png")
+            self.assertEqual(parser.meta["twitter:card"], "summary")
+            self.assertEqual(parser.meta["og:image:alt"], "TAR Vault Sync logo")
+            self.assertEqual(parser.scripts, [{"defer": None, "src": "assets/analytics.js"}])
+
     def test_catalogue_pages(self):
         root = Path(__file__).resolve().parents[1]
         for name in ("index.html", "releases.html", "credits.html"):
             source = (root / "docs" / name).read_text(encoding="utf-8")
             parser = GuideParser()
             parser.feed(source)
-            self.assertFalse(parser.scripts)
+            self.assertEqual(parser.scripts, [{"defer": None, "src": "assets/analytics.js"}])
             self.assertIn("A TAR Solution project", source)
             self.assertIn("Developed by fmarslan.com", source)
             for target in ("https://fmarslan.com/", "releases.html", "credits.html"):
@@ -66,7 +91,7 @@ class GuideTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1] / "docs"
         parser = GuideParser()
         parser.feed((root / "index.html").read_text(encoding="utf-8"))
-        self.assertFalse(parser.scripts, "The guide must remain static and script-free")
+        self.assertEqual(parser.scripts, [{"defer": None, "src": "assets/analytics.js"}])
         self.assertIn("https://fmarslan.com/", parser.links)
         self.assertEqual(len(parser.images), 7)
         for image in parser.images:

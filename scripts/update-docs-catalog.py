@@ -37,7 +37,21 @@ def link(url, label):
 
 def page(title, content, date):
     return f'''<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>TAR Vault Sync · {title}</title><link rel="stylesheet" href="site.css"></head>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>TAR Vault Sync · {title}</title><link rel="stylesheet" href="site.css">
+<link rel="icon" type="image/png" href="assets/mark.png">
+<script defer src="assets/analytics.js"></script>
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="TAR Vault Sync">
+<meta property="og:title" content="TAR Vault Sync">
+<meta property="og:description" content="Local-first encrypted vaults and secure secret synchronization.">
+<meta property="og:image" content="https://tarvault.tarsolution.com/assets/mark.png">
+<meta property="og:image:alt" content="TAR Vault Sync logo">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="TAR Vault Sync">
+<meta name="twitter:description" content="Local-first encrypted vaults and secure secret synchronization.">
+<meta name="twitter:image" content="https://tarvault.tarsolution.com/assets/mark.png">
+<meta name="twitter:image:alt" content="TAR Vault Sync logo">
+</head>
 <body><aside><a class="brand" href="index.html"><img src="assets/mark.png" alt=""><span>TAR<small>VAULT SYNC</small></span></a><p class="eyebrow">PROJECT</p><nav aria-label="Documentation"><a href="index.html">Desktop guide</a><a href="releases.html">Releases &amp; archive</a><a href="credits.html">Credits &amp; contributors</a></nav><a class="repo" href="https://github.com/{REPO}">View source on GitHub ↗</a><div class="credits"><a href="https://tarsolution.com/">A TAR Solution project</a><a href="https://fmarslan.com/">Developed by fmarslan.com</a><a href="credits.html">Credits &amp; contributors</a></div></aside>
 <main><header><p class="eyebrow">TAR VAULT SYNC</p><h1>{title}</h1></header>{content}<footer>GitHub metadata snapshot: {date}. This static page makes no browser API requests.</footer></main></body></html>
 '''
