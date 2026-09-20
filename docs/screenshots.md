@@ -23,7 +23,8 @@ backend. It renders the application directly; it never imports a browser
 profile, unlocks a real vault, or contacts a cloud provider. Review every PNG
 before committing. Do not publish screenshots from a real workspace.
 
-The static site is `docs/index.html`; no build framework or client JavaScript is
-needed. GitHub Pages should publish this directory. Its intended custom domain
+The static site is `docs/index.html`; no build framework is needed. Optional
+website analytics loads only after visitor consent. GitHub Pages publishes
+this directory. Its custom domain
 is `tarvault.tarsolution.com`. Publishing documentation does not publish an app
 release or satisfy any release acceptance gate.

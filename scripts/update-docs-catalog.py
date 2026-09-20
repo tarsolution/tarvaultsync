@@ -1,4 +1,4 @@
-"""Generate script-free release and contributor pages from public GitHub metadata."""
+"""Generate static release and contributor pages from public GitHub metadata."""
 
 from datetime import datetime, timezone
 from html import escape
@@ -53,7 +53,7 @@ def page(title, content, date):
 <meta name="twitter:image:alt" content="TAR Vault Sync logo">
 </head>
 <body><aside><a class="brand" href="index.html"><img src="assets/mark.png" alt=""><span>TAR<small>VAULT SYNC</small></span></a><p class="eyebrow">PROJECT</p><nav aria-label="Documentation"><a href="index.html">Desktop guide</a><a href="releases.html">Releases &amp; archive</a><a href="credits.html">Credits &amp; contributors</a></nav><a class="repo" href="https://github.com/{REPO}">View source on GitHub ↗</a><div class="credits"><a href="https://tarsolution.com/">A TAR Solution project</a><a href="https://fmarslan.com/">Developed by fmarslan.com</a><a href="credits.html">Credits &amp; contributors</a></div></aside>
-<main><header><p class="eyebrow">TAR VAULT SYNC</p><h1>{title}</h1></header>{content}<footer>GitHub metadata snapshot: {date}. This static page makes no browser API requests.</footer></main></body></html>
+<main><header><p class="eyebrow">TAR VAULT SYNC</p><h1>{title}</h1></header>{content}<footer>GitHub metadata snapshot: {date}. Release and contributor data are static.</footer></main></body></html>
 '''
 
 
