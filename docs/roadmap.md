@@ -2,7 +2,7 @@
 
 TAR Vault Sync will be built in the following order. Each phase should deliver a usable vertical slice with focused tests and documentation. Connector and sync modules own their configuration UI; the core provides only the contracts and host surface for those screens.
 
-Phase 1 is complete for the fake-module test host described below. Phases 2–5 have development implementations; [phase 2–5 QA](qa-phase2-5.md) records verified behavior and remaining native release gates. Later phases remain planned. [Requirements](requirements.md) define the product and security constraints.
+Phase 1 is complete for the fake-module test host described below. Phases 2–9 and the limited Azure slice in phase 10 have development implementations; [phase 2–5 QA](qa-phase2-5.md) records earlier verified behavior and native release gates. Phases 11–13 remain deferred or planned. [Requirements](requirements.md) define the product and security constraints.
 
 ## 1. Core infrastructure
 
@@ -27,7 +27,7 @@ Phase 1 is complete for the fake-module test host described below. Phases 2–5 
 
 ## 2. Vault entry and local vault store
 
-**Status:** Encrypted store, CLI flow, and native desktop vault entry screen implemented; platform packaging and visual QA remain open.
+**Status:** Encrypted store, CLI flow, and native desktop vault entry screen implemented. The Sources page supports multiple file-system vault references, source-specific binding selection, independent unlock state and non-destructive connection removal. Native release acceptance remains open.
 
 - Build the vault unlock/entry screen and local encrypted vault store.
 - Define the store-connection UI contract used by local and future cloud stores.
@@ -66,6 +66,8 @@ Phase 1 is complete for the fake-module test host described below. Phases 2–5 
 
 ## 6. Microsoft password manager import and sync
 
+**Status:** Import-only scope selected; native CSV-to-encrypted-vault implementation is in development. Real Edge export/UI acceptance remains open. See [browser import](browser-import.md).
+
 - Investigate supported Microsoft Edge/password-manager import and write interfaces and their platform restrictions.
 - Implement user-approved import first. Add ongoing sync only if a supported API permits it safely.
 - Define conflict resolution and deletion rules before enabling two-way changes.
@@ -74,12 +76,16 @@ Phase 1 is complete for the fake-module test host described below. Phases 2–5 
 
 ## 7. Chrome password manager import and sync
 
+**Status:** Shares the explicit-consent CSV import implementation; continuous sync is disabled. Real Chrome export/UI acceptance remains open. See [browser import](browser-import.md).
+
 - Investigate supported Chrome/Google Password Manager import and write interfaces.
 - Follow the same explicit-consent, conflict, and deletion rules as phase 6; do not modify browser profile databases directly.
 
 **Done when:** the supported integration is verified, or an import-only scope is documented if direct sync is unavailable.
 
 ## 8. OneDrive store connector
+
+**Status:** Native OAuth/PKCE, OS credential storage, selected-folder encrypted vaults, and conditional writes implemented. Windows real-account create/read/rotate/lock/reopen and stale-write rejection passed on 2026-09-20. Two physical-device and macOS/Linux live-account acceptance remain open.
 
 - Store encrypted vault data in the user's OneDrive with revision-aware reads and writes.
 - Detect concurrent edits and present conflicts rather than silently overwriting a vault.
@@ -88,11 +94,15 @@ Phase 1 is complete for the fake-module test host described below. Phases 2–5 
 
 ## 9. Google Drive store connector
 
+**Status:** Native OAuth/PKCE with limited Drive Picker access, OS credential storage, revision-pinned downloads, and conditional writes implemented. Windows real-account create/read/rotate/lock/reopen and stale-write rejection passed on 2026-09-20; synthetic files were trashed and temporary credentials removed. Two physical-device and macOS/Linux live-account acceptance remain open. Existing project-wide consent branding was not modified.
+
 - Apply the same encrypted-vault, revision, and conflict contracts to Google Drive.
 
 **Done when:** a paired device can read and update the encrypted vault through Google Drive without exposing plaintext to Drive.
 
 ## 10. Azure Key Vault connector
+
+**Status:** Development implementation for Azure public-cloud text secrets, using existing Azure CLI authentication and the native desktop binding editor. Live Windows validation passed on 2026-09-20 for rotation, metadata-only unchanged checks, redaction, soft-delete cleanup, and failed-source target preservation. Embedded sign-in, CLI-agent support, interactive UI acceptance, and macOS/Linux cloud acceptance remain open. See [Azure connector](azure-key-vault.md).
 
 - Add authentication, metadata-only version checks, and secret-value retrieval on change.
 - Map Azure secret versions and errors into the common store contract.
@@ -101,12 +111,16 @@ Phase 1 is complete for the fake-module test host described below. Phases 2–5 
 
 ## 11. AWS Secrets Manager connector
 
+**Current scope:** Deferred by user request; not part of the four-source delivery.
+
 - Add authentication, version/stage checks, and value retrieval through AWS Secrets Manager.
 - Confirm the intended service name before implementation; this phase interprets "AWS password manager" as AWS Secrets Manager.
 
 **Done when:** a changed AWS secret updates its targets under least-privilege access.
 
 ## 12. Google Secret Manager connector
+
+**Current scope:** Deferred by user request. Google Drive is a separate, in-scope encrypted-vault source.
 
 - Add Google Cloud Secret Manager authentication, version metadata checks, and value retrieval.
 - Confirm the intended service name before implementation; this phase interprets "Google vault" as Google Cloud Secret Manager.

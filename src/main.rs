@@ -20,17 +20,51 @@ use zeroize::Zeroizing;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
-    let root = env::var("TAR_VAULT_SYNC_DIR")
-        .map(PathBuf::from)
-        .unwrap_or(env::current_dir()?);
+    if args
+        .get(1)
+        .is_some_and(|mode| mode == "--version" || mode == "-V")
+    {
+        println!("TAR Vault Sync {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    if args
+        .get(1)
+        .is_some_and(|mode| mode == "--help" || mode == "-h")
+    {
+        println!("TAR Vault Sync\n\nUsage: tar-vault-sync [desktop|agent|config|vault|sync|status|logs|ack-restart|enable]\n\nNo arguments opens the desktop app.\nSet TAR_VAULT_SYNC_DIR to select a workspace.\nUse --version to print the application version.");
+        return Ok(());
+    }
+    let desktop = args.get(1).is_none_or(|mode| mode == "desktop");
+    let root = match env::var_os("TAR_VAULT_SYNC_DIR") {
+        Some(path) => PathBuf::from(path),
+        None if desktop => desktop_root()?,
+        None => env::current_dir()?,
+    };
+    if desktop {
+        fs::create_dir_all(&root)?;
+    }
     let root = root.canonicalize()?;
-    if args.get(1).is_some_and(|mode| mode == "desktop") {
+    if desktop {
         return tar_vault_sync::desktop::run(root);
     }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     runtime.block_on(async_main(args, root))
+}
+
+fn desktop_root() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    #[cfg(target_os = "windows")]
+    let base = PathBuf::from(env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA is unavailable")?);
+    #[cfg(target_os = "macos")]
+    let base = PathBuf::from(env::var_os("HOME").ok_or("HOME is unavailable")?)
+        .join("Library/Application Support");
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let base = match env::var_os("XDG_DATA_HOME") {
+        Some(path) if PathBuf::from(&path).is_absolute() => PathBuf::from(path),
+        _ => PathBuf::from(env::var_os("HOME").ok_or("HOME is unavailable")?).join(".local/share"),
+    };
+    Ok(base.join("tar-vault-sync"))
 }
 
 async fn async_main(args: Vec<String>, root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {

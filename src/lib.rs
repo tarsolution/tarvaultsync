@@ -1,6 +1,12 @@
+mod azure;
+mod browser_import;
+mod cloud_auth;
 pub mod core;
 pub mod desktop;
+mod drive;
+mod drive_ui;
 pub mod ipc;
 pub mod scheduler;
+mod sources;
 pub mod targets;
 pub mod vault;

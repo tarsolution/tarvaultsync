@@ -366,7 +366,19 @@ pub fn validate_config(data: &[u8], root: &Path) -> Result<Config, ErrorCategory
             _ => return Err(ErrorCategory::InvalidConfig),
         }
         if matches!(b.source.store, StoreKind::Fake) != matches!(b.target, TargetSpec::Fake { .. })
-            || !matches!(b.source.store, StoreKind::Fake | StoreKind::LocalVault)
+            || !matches!(
+                b.source.store,
+                StoreKind::Fake
+                    | StoreKind::LocalVault
+                    | StoreKind::Azure
+                    | StoreKind::OneDrive
+                    | StoreKind::GoogleDrive
+            )
+        {
+            return Err(ErrorCategory::InvalidConfig);
+        }
+        if b.source.store == StoreKind::Azure
+            && (!crate::azure::valid_source(&b.source) || b.secret_type != SecretType::Text)
         {
             return Err(ErrorCategory::InvalidConfig);
         }
@@ -459,6 +471,9 @@ fn atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<(), ErrorCategory
     f.write_all(&bytes)
         .and_then(|_| f.sync_all())
         .map_err(|_| ErrorCategory::State)?;
+    // ReplaceFileW needs to reopen the replacement with read/delete access.
+    // File::create leaves a write-only handle open until explicitly dropped.
+    drop(f);
     replace_file(&tmp, path).map_err(|_| ErrorCategory::State)
 }
 
@@ -725,7 +740,12 @@ impl Engine {
                 MissingTargetPolicy::Recreate => {}
             }
         }
-        let version = match self.source.get_version(&b.source) {
+        let source = self.source.clone();
+        let reference = b.source.clone();
+        let version = match tokio::task::spawn_blocking(move || source.get_version(&reference))
+            .await
+            .unwrap_or(Err(ErrorCategory::Source))
+        {
             Ok(v) => v,
             Err(e) => return SyncOutcome::Failed(e),
         };
@@ -748,7 +768,15 @@ impl Engine {
                 SyncOutcome::Unchanged
             };
         }
-        let payload = match self.source.get_value(&b.source, &version) {
+        let source = self.source.clone();
+        let reference = b.source.clone();
+        let requested_version = version.clone();
+        let payload = match tokio::task::spawn_blocking(move || {
+            source.get_value(&reference, &requested_version)
+        })
+        .await
+        .unwrap_or(Err(ErrorCategory::Source))
+        {
             Ok(p) => p,
             Err(e) => return SyncOutcome::Failed(e),
         };
@@ -870,6 +898,39 @@ impl LocalTarget for FakeTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn state_replacement_persists_repeated_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut state = State {
+            version: SCHEMA_VERSION,
+            ..State::default()
+        };
+        atomic_json(&path, &state).unwrap();
+        for version in ["v1", "v2", "v3"] {
+            state
+                .applied
+                .insert("binding".into(), SourceVersion(version.into()));
+            atomic_json(&path, &state).unwrap();
+            assert_eq!(load_state(&path).unwrap().applied, state.applied);
+            assert!(!path.with_extension("tmp").exists());
+        }
+    }
+
+    #[test]
+    fn failed_replacement_preserves_previous_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let state = State {
+            version: SCHEMA_VERSION,
+            ..State::default()
+        };
+        atomic_json(&path, &state).unwrap();
+        let previous = fs::read(&path).unwrap();
+        assert!(replace_file(&dir.path().join("missing.tmp"), &path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), previous);
+    }
+
     #[test]
     fn single_agent_lock_rejects_second_writer() {
         let dir = tempfile::tempdir().unwrap();
