@@ -1,9 +1,8 @@
-name: Desktop CI and release
+name: Desktop validation
 
 on:
   push:
     branches: [main]
-    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -89,12 +88,9 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  release:
+  verify-artifacts:
     needs: desktop
-    if: github.event_name == 'push' && github.repository == 'tarsolution/tarvaultsync'
     runs-on: ubuntu-24.04
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -104,20 +100,5 @@ jobs:
           path: dist
       - name: Verify release assets
         run: python scripts/verify-release.py dist
-      - name: Publish verified release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
-            tag="$GITHUB_REF_NAME"
-          else
-            version=$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
-            tag="v${version}-preview.${GITHUB_RUN_NUMBER}"
-          fi
-          gh release create "$tag" dist/*.zip dist/*.tar.gz dist/SHA256SUMS \
-            --target "$GITHUB_SHA" --draft --prerelease \
-            --title "TAR Vault Sync $tag" --notes-file docs/release-notes.md
-          gh release edit "$tag" --draft=false
+      # CI artifacts are test inputs, not releases. Publishing stays disabled until
+      # roadmap implementation and real-environment acceptance are complete.
