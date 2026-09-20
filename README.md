@@ -2,7 +2,7 @@
 
 TAR Vault Sync is a planned local-first agent for keeping development secrets in sync across machines and project files. It is designed to read from Azure Key Vault, Google Secret Manager, or an optional encrypted vault stored in Google Drive or OneDrive, then apply the current values to configured local targets.
 
-**Status:** Roadmap phases 2–5 have a local encrypted vault, file and Docker renderers, a Git Credential Manager target, and a native Rust management window. This is not a packaged desktop release: platform builds, secure-store IPC authentication for the separate `agent` mode, and macOS/Linux integration checks remain open. See the [phase 2–5 QA record](docs/qa-phase2-5.md).
+**Status:** Roadmap phases 2–5 provide a local encrypted vault, file and Docker renderers, a Git Credential Manager target, and an English native desktop interface. The release pipeline builds and tests Windows, macOS, and Linux on AMD64 and ARM64. Preview packages are published only after the complete matrix succeeds. External connectors and production IPC authentication remain roadmap work. See the [release notes](docs/release-notes.md) and [phase 2–5 QA record](docs/qa-phase2-5.md).
 
 ## Intended capabilities
 
@@ -21,7 +21,7 @@ The implementation is planned in Rust. Day-to-day development and core tests wil
 
 Run `cargo test --workspace` for the core and phase 2–5 tests. On a machine with a graphical desktop and Rust 1.95 or newer, set `TAR_VAULT_SYNC_DIR` to the workspace root and run `cargo run -- desktop`. The native window manages local-vault creation/unlock/lock, entry rotation/removal, encrypted backup/recovery, typed bindings, sync/status, restart acknowledgement, disabled-binding reactivation, and redacted events. It uses no browser or local HTTP server. The window runs the scheduler while open; the separate `agent` mode remains available for background operation and still uses the development-only `TAR_VAULT_SYNC_TEST_TOKEN` IPC credential. Do not treat that mode as production authentication. CLI vault/config commands remain available; see the [development guide](docs/development.md).
 
-The window's Yönetim page can switch to an existing workspace root. Only one writer (`desktop` or `agent`) may own a workspace at a time. The [native build workflow](.github/workflows/desktop-build.yml) can produce Windows, macOS, and Linux binaries when run in GitHub Actions; the workflow has not yet been exercised on those runners.
+The Settings page can switch to an existing workspace root. Only one writer (`desktop` or `agent`) may own a workspace at a time. Download packages from [GitHub Releases](https://github.com/tarsolution/tarvaultsync/releases); each release includes all six builds and checksums. Open the executable without arguments to start the desktop app. Without `TAR_VAULT_SYNC_DIR`, it uses the platform's per-user application-data folder. `--help` and `--version` work without creating a workspace.
 
 ## Documentation
 
