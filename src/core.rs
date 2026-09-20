@@ -366,7 +366,15 @@ pub fn validate_config(data: &[u8], root: &Path) -> Result<Config, ErrorCategory
             _ => return Err(ErrorCategory::InvalidConfig),
         }
         if matches!(b.source.store, StoreKind::Fake) != matches!(b.target, TargetSpec::Fake { .. })
-            || !matches!(b.source.store, StoreKind::Fake | StoreKind::LocalVault)
+            || !matches!(
+                b.source.store,
+                StoreKind::Fake | StoreKind::LocalVault | StoreKind::Azure
+            )
+        {
+            return Err(ErrorCategory::InvalidConfig);
+        }
+        if b.source.store == StoreKind::Azure
+            && (!crate::azure::valid_source(&b.source) || b.secret_type != SecretType::Text)
         {
             return Err(ErrorCategory::InvalidConfig);
         }
@@ -728,7 +736,12 @@ impl Engine {
                 MissingTargetPolicy::Recreate => {}
             }
         }
-        let version = match self.source.get_version(&b.source) {
+        let source = self.source.clone();
+        let reference = b.source.clone();
+        let version = match tokio::task::spawn_blocking(move || source.get_version(&reference))
+            .await
+            .unwrap_or(Err(ErrorCategory::Source))
+        {
             Ok(v) => v,
             Err(e) => return SyncOutcome::Failed(e),
         };
@@ -751,7 +764,15 @@ impl Engine {
                 SyncOutcome::Unchanged
             };
         }
-        let payload = match self.source.get_value(&b.source, &version) {
+        let source = self.source.clone();
+        let reference = b.source.clone();
+        let requested_version = version.clone();
+        let payload = match tokio::task::spawn_blocking(move || {
+            source.get_value(&reference, &requested_version)
+        })
+        .await
+        .unwrap_or(Err(ErrorCategory::Source))
+        {
             Ok(p) => p,
             Err(e) => return SyncOutcome::Failed(e),
         };

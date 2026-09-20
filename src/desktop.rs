@@ -76,6 +76,8 @@ impl TargetChoice {
 
 struct BindingForm {
     original_id: Option<String>,
+    source_kind: StoreKind,
+    connection: String,
     id: String,
     entry: String,
     secret_type: SecretType,
@@ -94,6 +96,8 @@ impl Default for BindingForm {
     fn default() -> Self {
         Self {
             original_id: None,
+            source_kind: StoreKind::LocalVault,
+            connection: String::new(),
             id: String::new(),
             entry: String::new(),
             secret_type: SecretType::Text,
@@ -114,6 +118,8 @@ impl BindingForm {
     fn from_binding(binding: &Binding) -> Self {
         let mut form = Self {
             original_id: Some(binding.id.clone()),
+            source_kind: binding.source.store.clone(),
+            connection: binding.source.connection.clone(),
             id: binding.id.clone(),
             entry: binding.source.entry.clone(),
             secret_type: binding.secret_type.clone(),
@@ -216,8 +222,12 @@ impl BindingForm {
         Ok(Binding {
             id: self.id.clone(),
             source: SourceRef {
-                store: StoreKind::LocalVault,
-                connection: "local".into(),
+                store: self.source_kind.clone(),
+                connection: if self.source_kind == StoreKind::LocalVault {
+                    "local".into()
+                } else {
+                    self.connection.clone()
+                },
                 entry: self.entry.clone(),
             },
             secret_type: self.secret_type.clone(),
@@ -230,6 +240,7 @@ impl BindingForm {
 
 struct DesktopApp {
     brand_texture: Option<egui::TextureHandle>,
+    pending_sync: Option<JoinHandle<SyncOutcome>>,
     root: PathBuf,
     source: Arc<VaultSource>,
     target: Arc<ProductionTarget>,
@@ -274,23 +285,28 @@ impl DesktopApp {
                 bindings: Vec::new(),
             }
         };
-        if config
-            .bindings
-            .iter()
-            .any(|b| b.source.store != StoreKind::LocalVault || b.source.connection != "local")
-        {
-            return Err("The desktop app supports local vault bindings only.".into());
+        if config.bindings.iter().any(|b| {
+            !matches!(b.source.store, StoreKind::LocalVault | StoreKind::Azure)
+                || (b.source.store == StoreKind::LocalVault && b.source.connection != "local")
+        }) {
+            return Err(
+                "The desktop app supports local vault and Azure Key Vault bindings.".into(),
+            );
         }
         let source = Arc::new(VaultSource::new(
             root.join("local/vault.bin"),
             "local".into(),
         )?);
         let target = Arc::new(ProductionTarget::new(root.clone())?);
+        let sources = Arc::new(crate::azure::DesktopSources {
+            local: source.clone(),
+            azure: crate::azure::AzureSource::new(),
+        });
         let engine = Arc::new(Engine::new(
             config,
             root.join("local/state.json"),
             root.join("local/events.ndjson"),
-            source.clone(),
+            sources,
             target.clone(),
         )?);
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -299,6 +315,7 @@ impl DesktopApp {
         let schedules = spawn_schedules(&runtime, &engine);
         Ok(Self {
             brand_texture: None,
+            pending_sync: None,
             root_input: root.display().to_string(),
             root,
             source,
@@ -334,12 +351,18 @@ impl DesktopApp {
         self.is_error = true;
     }
     fn save_config(&mut self, config: Config) -> Result<(), &'static str> {
+        if self.pending_sync.is_some() {
+            return Err("Wait for the current sync to finish before changing bindings.");
+        }
         let bytes = serde_json::to_vec_pretty(&config)
             .map_err(|_| "Could not encode the configuration.")?;
         core::validate_config(&bytes, &self.root).map_err(|_| "The configuration is invalid.")?;
         for binding in &config.bindings {
-            if binding.source.store != StoreKind::LocalVault
-                || binding.source.connection != "local"
+            if !matches!(
+                binding.source.store,
+                StoreKind::LocalVault | StoreKind::Azure
+            ) || (binding.source.store == StoreKind::LocalVault
+                && binding.source.connection != "local")
                 || self
                     .target
                     .validate(&binding.target, &binding.secret_type)
@@ -385,7 +408,7 @@ impl DesktopApp {
             config,
             self.root.join("local/state.json"),
             self.root.join("local/events.ndjson"),
-            self.source.clone(),
+            self.engine.source.clone(),
             self.target.clone(),
         ) {
             Ok(engine) => Arc::new(engine),
@@ -439,13 +462,14 @@ impl DesktopApp {
         }
     }
     fn sync_binding(&mut self, id: &str) {
-        let outcome = self.runtime.block_on(self.engine.sync(id));
-        match outcome {
-            SyncOutcome::Failed(_) => {
-                self.error("Sync failed. Check the binding status and activity log.")
-            }
-            _ => self.notice("Sync check complete."),
+        if self.pending_sync.is_some() {
+            self.notice("A sync check is already running.");
+            return;
         }
+        let engine = self.engine.clone();
+        let id = id.to_owned();
+        self.pending_sync = Some(self.runtime.spawn(async move { engine.sync(&id).await }));
+        self.notice("Sync check running…");
     }
     fn vault_action(&mut self, action: &'static str) {
         let passphrase = self.passphrase.as_str();
@@ -581,7 +605,7 @@ impl DesktopApp {
                 ui.label(RichText::new("LOCAL FIRST. ALWAYS IN YOUR CONTROL.").size(10.0).strong().color(ACCENT));
                 ui.add_space(10.0);
                 ui.label(RichText::new("Your secrets. Your workspace.").size(32.0).strong().color(INK));
-                ui.label(RichText::new("Keep your files, containers, and credentials in sync\nwith one encrypted vault on your device.").size(15.0).color(MUTED));
+                ui.label(RichText::new("Keep your files, containers, and credentials in sync\nwith your local vault or Azure Key Vault.").size(15.0).color(MUTED));
                 ui.add_space(12.0);
                 if primary_button(ui, "Create binding").clicked() {
                     self.page = Page::Bindings;
@@ -616,7 +640,7 @@ impl DesktopApp {
             );
             metric(
                 &mut columns[1],
-                "VAULT STATUS",
+                "LOCAL VAULT STATUS",
                 if self.source.is_unlocked() {
                     "Unlocked"
                 } else {
@@ -899,15 +923,27 @@ impl DesktopApp {
             self.sync_binding(&id);
         }
         if let Some(id) = enable {
-            match self.runtime.block_on(self.engine.enable_binding(&id)) {
-                Ok(()) => self.notice("Binding enabled."),
-                Err(_) => self.error("Could not enable the binding."),
+            if self.pending_sync.is_none() {
+                let engine = self.engine.clone();
+                self.pending_sync = Some(self.runtime.spawn(async move {
+                    match engine.enable_binding(&id).await {
+                        Ok(()) => SyncOutcome::Unchanged,
+                        Err(error) => SyncOutcome::Failed(error),
+                    }
+                }));
+                self.notice("Enabling binding…");
             }
         }
         if let Some(id) = ack {
-            match self.runtime.block_on(self.engine.acknowledge_restart(&id)) {
-                Ok(()) => self.notice("Restart acknowledged."),
-                Err(_) => self.error("Could not acknowledge the restart."),
+            if self.pending_sync.is_none() {
+                let engine = self.engine.clone();
+                self.pending_sync = Some(self.runtime.spawn(async move {
+                    match engine.acknowledge_restart(&id).await {
+                        Ok(()) => SyncOutcome::Unchanged,
+                        Err(error) => SyncOutcome::Failed(error),
+                    }
+                }));
+                self.notice("Acknowledging restart…");
             }
         }
         if let Some(id) = remove {
@@ -929,8 +965,22 @@ impl DesktopApp {
                 let ui = &mut columns[0];
                 ui.label(RichText::new("01  SOURCE").size(11.0).strong().color(ACCENT));
                 field(ui, "Binding ID", &mut self.form.id);
-                field(ui, "Vault secret ID", &mut self.form.entry);
-                secret_type_combo(ui, "Secret type", &mut self.form.secret_type);
+                egui::ComboBox::from_id_salt("source_kind")
+                    .selected_text(if self.form.source_kind == StoreKind::Azure { "Azure Key Vault" } else { "Local vault" })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.form.source_kind, StoreKind::LocalVault, "Local vault");
+                        ui.selectable_value(&mut self.form.source_kind, StoreKind::Azure, "Azure Key Vault");
+                    });
+                if self.form.source_kind == StoreKind::Azure {
+                    field(ui, "Azure vault name", &mut self.form.connection);
+                    field(ui, "Azure secret name", &mut self.form.entry);
+                    self.form.secret_type = SecretType::Text;
+                    ui.label("Text secrets • Azure public cloud");
+                    ui.label("Uses your existing Azure CLI sign-in. Requires secrets/list and secrets/get. Values are fetched only when the version changes.");
+                } else {
+                    field(ui, "Vault secret ID", &mut self.form.entry);
+                    secret_type_combo(ui, "Secret type", &mut self.form.secret_type);
+                }
                 ui.add_space(18.0);
                 ui.label(RichText::new("03  SYNC SCHEDULE").size(11.0).strong().color(ACCENT));
                 field(ui, "Check interval (seconds)", &mut self.form.interval);
@@ -1063,6 +1113,7 @@ impl DesktopApp {
         ui.heading("Desktop agent");
         ui.label("Scheduled sync runs locally while this window is open.");
         ui.label("For background sync after closing the window, run the separate agent.");
+        ui.label("Azure bindings currently require the desktop window to stay open. Sign in with Azure CLI before syncing; no Azure credentials are saved in workspace settings.");
         ui.add_space(18.0);
         card(ui).show(ui, |ui| {
             ui.set_width(ui.available_width()); ui.strong("Development build");
@@ -1072,6 +1123,22 @@ impl DesktopApp {
 
 impl eframe::App for DesktopApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self
+            .pending_sync
+            .as_ref()
+            .is_some_and(JoinHandle::is_finished)
+        {
+            let result = self.runtime.block_on(self.pending_sync.take().unwrap());
+            match result {
+                Ok(SyncOutcome::Failed(_)) | Err(_) => {
+                    self.error("Sync failed. Check the binding status and activity log.")
+                }
+                Ok(_) => self.notice("Sync check complete."),
+            }
+        }
+        if self.pending_sync.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
         egui::SidePanel::left("nav")
             .resizable(false)
             .exact_width(218.0)
@@ -1386,6 +1453,42 @@ pub fn run(root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn azure_binding_can_be_saved_and_edited_without_a_local_vault() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = DesktopApp::new(dir.path().to_path_buf()).unwrap();
+        app.form = BindingForm {
+            id: "azure-binding".into(),
+            source_kind: StoreKind::Azure,
+            connection: "test-vault".into(),
+            entry: "test-secret".into(),
+            path: dir.path().join("authorized.txt").display().to_string(),
+            interval: "86400".into(),
+            ..BindingForm::default()
+        };
+        app.save_binding();
+        assert!(!app.is_error);
+        assert!(!app.source.exists());
+        let binding = &app.engine.config.bindings[0];
+        assert_eq!(binding.source.store, StoreKind::Azure);
+        assert_eq!(binding.source.connection, "test-vault");
+        let edited = BindingForm::from_binding(binding).binding().unwrap();
+        assert_eq!(&edited, binding);
+        let mut invalid = app.engine.config.clone();
+        invalid.bindings[0].secret_type = SecretType::Binary;
+        assert!(app.save_config(invalid).is_err());
+        let mut invalid = app.engine.config.clone();
+        invalid.bindings[0].source.connection = "test.vault".into();
+        assert!(app.save_config(invalid).is_err());
+        drop(app);
+        let reopened = DesktopApp::new(dir.path().to_path_buf()).unwrap();
+        assert_eq!(reopened.engine.config.bindings.len(), 1);
+        assert_eq!(
+            reopened.engine.config.bindings[0].source.store,
+            StoreKind::Azure
+        );
+    }
+
     #[test]
     fn embedded_brand_mark_is_valid_square_rgba_with_transparency() {
         let icon = eframe::icon_data::from_png_bytes(BRAND_MARK).unwrap();

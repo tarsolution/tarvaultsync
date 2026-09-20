@@ -35,6 +35,19 @@ mod tests {
     use std::{fs, sync::Mutex};
     use tokio::net::TcpListener;
 
+    // Blocking providers run on worker threads. Wait for their observable result
+    // without advancing Tokio's paused clock or assuming one yield is enough.
+    async fn wait_until(ready: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !ready() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "provider worker did not finish"
+            );
+            tokio::task::yield_now().await;
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn settings_fixture_manual_and_scheduled_ipc_sync() {
         let dir = tempfile::tempdir().unwrap();
@@ -107,7 +120,7 @@ mod tests {
         let scheduler = tokio::spawn(run_binding(engine.clone(), "b1".into(), 2, 0));
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_secs(2)).await;
-        tokio::task::yield_now().await;
+        wait_until(|| engine.status().applied.get("b1") == Some(&SourceVersion("v2".into()))).await;
         assert_eq!(*target.applies.lock().unwrap(), 2);
         assert!(
             matches!(request(addr,&Request::Status { token:"test-token".into() }).await.unwrap(),Response::Status { applied, .. } if applied==vec!["b1"])
@@ -169,7 +182,14 @@ mod tests {
         tokio::task::yield_now().await;
         assert_eq!(*store.reads.lock().unwrap(), (0, 0));
         tokio::time::advance(Duration::from_secs(1)).await;
-        tokio::task::yield_now().await;
+        wait_until(|| {
+            engine
+                .status()
+                .status
+                .get("b1")
+                .is_some_and(|status| status.outcome == SyncOutcome::Failed(ErrorCategory::Target))
+        })
+        .await;
         assert_eq!(*store.reads.lock().unwrap(), (1, 1));
         assert!(engine.status().applied.is_empty());
         *target.fail.lock().unwrap() = false;
@@ -177,7 +197,7 @@ mod tests {
         tokio::task::yield_now().await;
         assert!(engine.status().applied.is_empty());
         tokio::time::advance(Duration::from_millis(1)).await;
-        tokio::task::yield_now().await;
+        wait_until(|| engine.status().applied.contains_key("b1")).await;
         assert_eq!(engine.status().applied["b1"].0, "v1");
         assert_eq!(*target.applies.lock().unwrap(), 1);
         task.abort();

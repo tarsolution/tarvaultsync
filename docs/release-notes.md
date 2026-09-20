@@ -31,6 +31,8 @@ CI runs native tests, compiles the release binary, and executes `--version` on a
 Each archive has a SHA-256 checksum in `SHA256SUMS`. Checksums detect corruption; they are not publisher signatures.
 These archives are not code-signed or notarized and are not installers.
 
-Browser import, OneDrive/Google Drive encrypted-vault synchronization, Azure/AWS/Google secret sources,
-and a Git-backed vault remain roadmap work. Cloud-account integration and signed distribution are not included.
+Explicit-consent browser CSV import and an Azure public-cloud text-secret desktop connector are in development.
+Azure requires an existing Azure CLI sign-in; native embedded sign-in and cross-platform cloud acceptance remain open.
+OneDrive/Google Drive encrypted-vault synchronization, AWS/Google secret sources, and a Git-backed vault remain roadmap work.
+Signed distribution is not included.
 The independent CLI agent still uses development IPC authentication; the desktop app runs its scheduler while open.

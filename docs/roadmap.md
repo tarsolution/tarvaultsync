@@ -2,7 +2,7 @@
 
 TAR Vault Sync will be built in the following order. Each phase should deliver a usable vertical slice with focused tests and documentation. Connector and sync modules own their configuration UI; the core provides only the contracts and host surface for those screens.
 
-Phase 1 is complete for the fake-module test host described below. Phases 2–5 have development implementations; [phase 2–5 QA](qa-phase2-5.md) records verified behavior and remaining native release gates. Later phases remain planned. [Requirements](requirements.md) define the product and security constraints.
+Phase 1 is complete for the fake-module test host described below. Phases 2–7 and the limited Azure slice in phase 10 have development implementations; [phase 2–5 QA](qa-phase2-5.md) records earlier verified behavior and native release gates. Phases 8–9 and 11–13 remain planned. [Requirements](requirements.md) define the product and security constraints.
 
 ## 1. Core infrastructure
 
@@ -97,6 +97,8 @@ Phase 1 is complete for the fake-module test host described below. Phases 2–5 
 **Done when:** a paired device can read and update the encrypted vault through Google Drive without exposing plaintext to Drive.
 
 ## 10. Azure Key Vault connector
+
+**Status:** Development implementation for Azure public-cloud text secrets, using existing Azure CLI authentication and the native desktop binding editor. Live Windows validation passed on 2026-09-20 for rotation, metadata-only unchanged checks, redaction, soft-delete cleanup, and failed-source target preservation. Embedded sign-in, CLI-agent support, interactive UI acceptance, and macOS/Linux cloud acceptance remain open. See [Azure connector](azure-key-vault.md).
 
 - Add authentication, metadata-only version checks, and secret-value retrieval on change.
 - Map Azure secret versions and errors into the common store contract.
