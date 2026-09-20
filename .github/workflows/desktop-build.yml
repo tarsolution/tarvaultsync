@@ -1,38 +1,123 @@
-name: Native desktop build
+name: Desktop CI and release
 
 on:
-  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ['v*']
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  quality:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup toolchain install 1.95.0 --profile minimal --component rustfmt,clippy
+      - name: Format
+        run: cargo +1.95.0 fmt --all -- --check
+      - name: Lint
+        run: cargo +1.95.0 clippy --workspace --all-targets --locked -- -D warnings
+      - name: Package verification tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
+
   desktop:
+    needs: quality
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: windows-latest
-            artifact: tar-vault-sync-windows
-            executable: target/release/tar-vault-sync.exe
-          - runner: macos-latest
-            artifact: tar-vault-sync-macos
-            executable: target/release/tar-vault-sync
-          - runner: ubuntu-latest
-            artifact: tar-vault-sync-linux
-            executable: target/release/tar-vault-sync
+          - runner: windows-2025
+            platform: windows
+            arch: amd64
+            target: x86_64-pc-windows-msvc
+            suffix: .exe
+          - runner: windows-11-arm
+            platform: windows
+            arch: arm64
+            target: aarch64-pc-windows-msvc
+            suffix: .exe
+          - runner: macos-15-intel
+            platform: macos
+            arch: amd64
+            target: x86_64-apple-darwin
+            suffix: ''
+          - runner: macos-15
+            platform: macos
+            arch: arm64
+            target: aarch64-apple-darwin
+            suffix: ''
+          - runner: ubuntu-24.04
+            platform: linux
+            arch: amd64
+            target: x86_64-unknown-linux-gnu
+            suffix: ''
+          - runner: ubuntu-24.04-arm
+            platform: linux
+            arch: arm64
+            target: aarch64-unknown-linux-gnu
+            suffix: ''
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-      - name: Rust stable
-        run: rustup update stable
-      - name: Tests
-        run: cargo test --workspace --locked
-      - name: Desktop binary
-        run: cargo build --release --locked
+      - name: Install Rust
+        run: rustup toolchain install 1.95.0 --profile minimal --target ${{ matrix.target }}
+      - name: Native tests
+        run: cargo +1.95.0 test --workspace --locked --target ${{ matrix.target }}
+      - name: Release build
+        run: cargo +1.95.0 build --release --locked --target ${{ matrix.target }}
+      - name: Native executable smoke test
+        run: ./target/${{ matrix.target }}/release/tar-vault-sync${{ matrix.suffix }} --version
+      - name: Package
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Build archive
+        run: python scripts/package-release.py --platform ${{ matrix.platform }} --arch ${{ matrix.arch }} --target ${{ matrix.target }}
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.executable }}
+          name: tar-vault-sync-${{ matrix.platform }}-${{ matrix.arch }}
+          path: dist/*
           if-no-files-found: error
+          retention-days: 30
+
+  release:
+    needs: desktop
+    if: github.event_name == 'push' && github.repository == 'tarsolution/tarvaultsync'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: tar-vault-sync-*
+          merge-multiple: true
+          path: dist
+      - name: Verify release assets
+        run: python scripts/verify-release.py dist
+      - name: Publish verified release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            version=$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+            tag="v${version}-preview.${GITHUB_RUN_NUMBER}"
+          fi
+          gh release create "$tag" dist/*.zip dist/*.tar.gz dist/SHA256SUMS \
+            --target "$GITHUB_SHA" --draft --prerelease \
+            --title "TAR Vault Sync $tag" --notes-file docs/release-notes.md
+          gh release edit "$tag" --draft=false
