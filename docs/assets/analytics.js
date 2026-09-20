@@ -18,6 +18,7 @@
     window.gtag("config", measurementId, {
       page_location: location.origin + location.pathname,
       page_referrer: "",
+      cookie_domain: "tarvault.tarsolution.com",
       allow_google_signals: false,
       allow_ad_personalization_signals: false
     });
@@ -56,7 +57,7 @@
         for (const cookie of document.cookie.split(";")) {
           const name = cookie.split("=")[0].trim();
           if (name === "_ga" || name.startsWith("_ga_")) {
-            for (const domain of ["", "; domain=tarvault.tarsolution.com", "; domain=.tarsolution.com"]) {
+            for (const domain of ["", "; domain=tarvault.tarsolution.com"]) {
               document.cookie = name + "=; Max-Age=0; path=/" + domain;
             }
           }
