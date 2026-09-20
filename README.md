@@ -1,5 +1,7 @@
 # TAR Vault Sync
 
+[Powered by fmarslan.com](https://fmarslan.com/)
+
 TAR Vault Sync is a planned local-first agent for keeping development secrets in sync across machines and project files. It is designed to read from Azure Key Vault, Google Secret Manager, or an optional encrypted vault stored in Google Drive or OneDrive, then apply the current values to configured local targets.
 
 **Status:** Roadmap phases 2–5 provide a local encrypted vault, file and Docker renderers, a Git Credential Manager target, and an English native desktop interface. CI targets Windows, macOS, and Linux on AMD64 and ARM64; passing builds are not proof of real-environment integration. Automatic release publishing is disabled. External connectors, production IPC authentication, and real-environment acceptance remain unfinished. See the [release notes](docs/release-notes.md) and [phase 2–5 QA record](docs/qa-phase2-5.md).

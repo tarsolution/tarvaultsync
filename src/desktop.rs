@@ -1347,6 +1347,12 @@ impl eframe::App for DesktopApp {
                     }
                 }
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+                    ui.hyperlink_to(
+                        RichText::new("Powered by fmarslan.com")
+                            .size(11.0)
+                            .color(Color32::from_rgb(121, 144, 165)),
+                        "https://fmarslan.com/",
+                    );
                     ui.label(
                         RichText::new("Desktop  /  v0.1.0")
                             .size(10.0)

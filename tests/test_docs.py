@@ -33,6 +33,7 @@ class GuideTests(unittest.TestCase):
         parser = GuideParser()
         parser.feed((root / "index.html").read_text(encoding="utf-8"))
         self.assertFalse(parser.scripts, "The guide must remain static and script-free")
+        self.assertIn("https://fmarslan.com/", parser.links)
         self.assertEqual(len(parser.images), 7)
         for image in parser.images:
             self.assertIn("alt", image)
