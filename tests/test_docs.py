@@ -3,6 +3,7 @@
 from html.parser import HTMLParser
 from pathlib import Path
 import unittest
+import importlib.util
 from urllib.parse import urlsplit
 
 
@@ -28,6 +29,39 @@ class GuideParser(HTMLParser):
 
 
 class GuideTests(unittest.TestCase):
+    def test_catalogue_pages(self):
+        root = Path(__file__).resolve().parents[1]
+        for name in ("index.html", "releases.html", "credits.html"):
+            source = (root / "docs" / name).read_text(encoding="utf-8")
+            parser = GuideParser()
+            parser.feed(source)
+            self.assertFalse(parser.scripts)
+            self.assertIn("A TAR Solution project", source)
+            self.assertIn("Developed by fmarslan.com", source)
+            for target in ("https://fmarslan.com/", "releases.html", "credits.html"):
+                self.assertIn(target, parser.links)
+            for target in parser.links:
+                parts = urlsplit(target)
+                if not parts.scheme and parts.path:
+                    self.assertTrue((root / "docs" / parts.path).is_file(), target)
+        spec = importlib.util.spec_from_file_location("catalog", root / "scripts/update-docs-catalog.py")
+        catalog = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(catalog)
+        empty = catalog.releases_content([])
+        self.assertIn("No stable release", empty)
+        records = [dict(name="<Preview>", tag_name="v2", html_url="https://github.com/test/release",
+                        published_at="2026-09-20T00:00:00Z", prerelease=True),
+                   dict(name="Stable", tag_name="v1", html_url="https://github.com/test/stable",
+                        published_at="2026-09-19T00:00:00Z", prerelease=False)]
+        rendered = catalog.releases_content(records)
+        latest, archive = rendered.split('id="archive"')
+        self.assertIn("Stable", latest)
+        self.assertNotIn("&lt;Preview&gt;", latest)
+        self.assertIn("&lt;Preview&gt;", archive)
+        self.assertIn("Pre-release", archive)
+        with self.assertRaises(ValueError):
+            catalog.link("javascript:alert(1)", "unsafe")
+
     def test_static_guide_assets_and_navigation(self):
         root = Path(__file__).resolve().parents[1] / "docs"
         parser = GuideParser()
