@@ -14,31 +14,6 @@ use std::{
 use url::Url;
 use zeroize::Zeroizing;
 
-pub(crate) struct DesktopSources {
-    pub(crate) local: std::sync::Arc<crate::vault::VaultSource>,
-    pub(crate) azure: AzureSource,
-}
-impl SourceConnection for DesktopSources {
-    fn get_version(&self, source: &SourceRef) -> Result<SourceVersion, ErrorCategory> {
-        match source.store {
-            StoreKind::LocalVault => self.local.get_version(source),
-            StoreKind::Azure => self.azure.get_version(source),
-            _ => Err(ErrorCategory::InvalidConfig),
-        }
-    }
-    fn get_value(
-        &self,
-        source: &SourceRef,
-        version: &SourceVersion,
-    ) -> Result<SecretPayload, ErrorCategory> {
-        match source.store {
-            StoreKind::LocalVault => self.local.get_value(source, version),
-            StoreKind::Azure => self.azure.get_value(source, version),
-            _ => Err(ErrorCategory::InvalidConfig),
-        }
-    }
-}
-
 const API_VERSION: &str = "2025-07-01";
 const MAX_RESPONSE: u64 = 256 * 1024;
 const MAX_PAGES: usize = 100;

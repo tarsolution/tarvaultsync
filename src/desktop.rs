@@ -6,6 +6,7 @@ use crate::{
         SecretPayload, SecretType, SourceRef, StoreKind, StructuredFormat, SyncOutcome, TargetSpec,
     },
     scheduler,
+    sources::{Connection, Location, Sources},
     targets::ProductionTarget,
     vault::VaultSource,
 };
@@ -32,6 +33,7 @@ const BRAND_MARK: &[u8] = include_bytes!("../assets/branding/tar-vault-sync-mark
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
     Overview,
+    Sources,
     Vault,
     Bindings,
     Events,
@@ -97,7 +99,7 @@ impl Default for BindingForm {
         Self {
             original_id: None,
             source_kind: StoreKind::LocalVault,
-            connection: String::new(),
+            connection: "local".into(),
             id: String::new(),
             entry: String::new(),
             secret_type: SecretType::Text,
@@ -223,11 +225,7 @@ impl BindingForm {
             id: self.id.clone(),
             source: SourceRef {
                 store: self.source_kind.clone(),
-                connection: if self.source_kind == StoreKind::LocalVault {
-                    "local".into()
-                } else {
-                    self.connection.clone()
-                },
+                connection: self.connection.clone(),
                 entry: self.entry.clone(),
             },
             secret_type: self.secret_type.clone(),
@@ -243,6 +241,11 @@ struct DesktopApp {
     pending_sync: Option<JoinHandle<SyncOutcome>>,
     root: PathBuf,
     source: Arc<VaultSource>,
+    sources: Arc<Sources>,
+    selected_source: String,
+    connection_id: String,
+    connection_path: String,
+    connection_azure: bool,
     target: Arc<ProductionTarget>,
     engine: Arc<Engine>,
     runtime: tokio::runtime::Runtime,
@@ -285,28 +288,20 @@ impl DesktopApp {
                 bindings: Vec::new(),
             }
         };
-        if config.bindings.iter().any(|b| {
-            !matches!(b.source.store, StoreKind::LocalVault | StoreKind::Azure)
-                || (b.source.store == StoreKind::LocalVault && b.source.connection != "local")
-        }) {
-            return Err(
-                "The desktop app supports local vault and Azure Key Vault bindings.".into(),
-            );
-        }
         let source = Arc::new(VaultSource::new(
             root.join("local/vault.bin"),
             "local".into(),
         )?);
         let target = Arc::new(ProductionTarget::new(root.clone())?);
-        let sources = Arc::new(crate::azure::DesktopSources {
-            local: source.clone(),
-            azure: crate::azure::AzureSource::new(),
-        });
+        let sources = Arc::new(Sources::open(&root, source.clone())?);
+        for binding in &config.bindings {
+            sources.validate_ref(&binding.source)?;
+        }
         let engine = Arc::new(Engine::new(
             config,
             root.join("local/state.json"),
             root.join("local/events.ndjson"),
-            sources,
+            sources.clone(),
             target.clone(),
         )?);
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -319,6 +314,11 @@ impl DesktopApp {
             root_input: root.display().to_string(),
             root,
             source,
+            sources,
+            selected_source: "local".into(),
+            connection_id: String::new(),
+            connection_path: String::new(),
+            connection_azure: false,
             target,
             engine,
             runtime,
@@ -358,11 +358,7 @@ impl DesktopApp {
             .map_err(|_| "Could not encode the configuration.")?;
         core::validate_config(&bytes, &self.root).map_err(|_| "The configuration is invalid.")?;
         for binding in &config.bindings {
-            if !matches!(
-                binding.source.store,
-                StoreKind::LocalVault | StoreKind::Azure
-            ) || (binding.source.store == StoreKind::LocalVault
-                && binding.source.connection != "local")
+            if self.sources.validate_ref(&binding.source).is_err()
                 || self
                     .target
                     .validate(&binding.target, &binding.secret_type)
@@ -529,6 +525,10 @@ impl DesktopApp {
     fn header(&mut self, ui: &mut egui::Ui) {
         let (title, subtitle) = match self.page {
             Page::Overview => ("Overview", "A clear view of your local secret workspace."),
+            Page::Sources => (
+                "Sources",
+                "Manage the vaults that supply your local targets.",
+            ),
             Page::Vault => ("Vault", "Secure storage. Simple access. Always local."),
             Page::Bindings => (
                 "Bindings",
@@ -715,7 +715,133 @@ impl DesktopApp {
             }
         });
     }
+    fn select_source(&mut self, id: &str) -> Result<(), core::ErrorCategory> {
+        let source = self.sources.file(id)?;
+        self.passphrase.zeroize();
+        self.secret_text.zeroize();
+        self.secret_file.clear();
+        self.entry_id.clear();
+        self.backup_path.clear();
+        self.import_path.clear();
+        self.import_prefix.clear();
+        self.import_consent = false;
+        self.pending_delete_entry = None;
+        self.source = source;
+        self.selected_source = id.into();
+        self.page = Page::Vault;
+        Ok(())
+    }
+    fn remove_source(&mut self, id: &str) -> Result<(), core::ErrorCategory> {
+        if self.pending_sync.is_some()
+            || self
+                .engine
+                .config
+                .bindings
+                .iter()
+                .any(|b| b.source.connection == id)
+        {
+            return Err(core::ErrorCategory::InvalidConfig);
+        }
+        self.sources.remove(id)?;
+        if self.selected_source == id {
+            self.select_source("local")?;
+        }
+        Ok(())
+    }
+    fn source_connections(&mut self, ui: &mut egui::Ui) {
+        let connections = match self.sources.list() {
+            Ok(connections) => connections,
+            Err(_) => {
+                self.error("Could not read source connections.");
+                return;
+            }
+        };
+        ui.label("Connections store references only. Each file-system vault has its own passphrase and lock state.");
+        if ui.button("Open workspace vault (local)").clicked()
+            && self.select_source("local").is_err()
+        {
+            self.error("Could not select the vault.");
+        }
+        ui.add_space(12.0);
+        for connection in connections {
+            card(ui).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.strong(&connection.id);
+                ui.label(connection.location.label());
+                if let Location::FileSystem { path } = &connection.location {
+                    ui.label(path.display().to_string());
+                }
+                ui.horizontal(|ui| {
+                    if connection.location.store() == StoreKind::LocalVault
+                        && ui.button("Manage vault").clicked()
+                        && self.select_source(&connection.id).is_err()
+                    {
+                        self.error("Could not select the vault.");
+                    }
+                    if ui.button("Create binding").clicked() {
+                        self.form = BindingForm {
+                            source_kind: connection.location.store(),
+                            connection: connection.id.clone(),
+                            ..BindingForm::default()
+                        };
+                        self.editing = true;
+                        self.page = Page::Bindings;
+                    }
+                    let used = self
+                        .engine
+                        .config
+                        .bindings
+                        .iter()
+                        .any(|b| b.source.connection == connection.id);
+                    if ui
+                        .add_enabled(
+                            !used && self.pending_sync.is_none(),
+                            egui::Button::new("Remove connection"),
+                        )
+                        .clicked()
+                    {
+                        match self.remove_source(&connection.id) {
+                            Ok(()) => {
+                                self.notice("Connection removed. The vault file was not deleted.")
+                            }
+                            Err(_) => self.error("Could not remove this connection."),
+                        }
+                    }
+                    if used {
+                        ui.label("Used by bindings");
+                    }
+                });
+            });
+            ui.add_space(8.0);
+        }
+        card(ui).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.heading("Add source connection");
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.connection_azure, false, "File System");
+                ui.selectable_value(&mut self.connection_azure, true, "Azure Key Vault");
+            });
+            field(ui, if self.connection_azure { "Azure vault name" } else { "Connection ID" }, &mut self.connection_id);
+            if !self.connection_azure { field(ui, "Absolute encrypted vault file path", &mut self.connection_path); }
+            if primary_button(ui, "Add connection").clicked() {
+                let location = if self.connection_azure { Location::AzureKeyVault { vault_name: self.connection_id.clone() } }
+                    else { Location::FileSystem { path: self.connection_path.clone().into() } };
+                let connection = Connection { id: self.connection_id.clone(), location };
+                // Never repoint an existing binding by introducing an alias with the same ID.
+                if self.engine.config.bindings.iter().any(|b| b.source.connection == connection.id && b.source.store != connection.location.store()) {
+                    self.error("This connection ID is already used by another source type.");
+                } else {
+                    match self.sources.add(connection) {
+                        Ok(()) => { self.connection_id.clear(); self.connection_path.clear(); self.notice("Connection added. Open Manage vault to create or unlock a file-system vault."); }
+                        Err(_) => self.error("Could not add the connection. Check its unique ID and absolute path; the parent folder must exist."),
+                    }
+                }
+            }
+            ui.label("Removing a connection never deletes its vault. OneDrive and Google Drive sign-in integration is not available in this build yet.");
+        });
+    }
     fn vault(&mut self, ui: &mut egui::Ui) {
+        ui.label(format!("Selected source: {}", self.selected_source));
         ui.label(RichText::new("Manage encrypted secrets and backups. Your vault locks after 15 minutes of inactivity.").color(MUTED));
         ui.add_space(14.0);
         card(ui).show(ui, |ui| {
@@ -978,6 +1104,19 @@ impl DesktopApp {
                     ui.label("Text secrets • Azure public cloud");
                     ui.label("Uses your existing Azure CLI sign-in. Requires secrets/list and secrets/get. Values are fetched only when the version changes.");
                 } else {
+                    let connections = match self.sources.list() {
+                        Ok(connections) => connections,
+                        Err(_) => { ui.colored_label(DANGER, "Could not load source connections."); return; }
+                    };
+                    egui::ComboBox::from_id_salt("binding_source_connection")
+                        .selected_text(&self.form.connection).show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.form.connection, "local".into(), "local (workspace vault)");
+                            for connection in connections {
+                                if connection.location.store() == StoreKind::LocalVault {
+                                    ui.selectable_value(&mut self.form.connection, connection.id.clone(), &connection.id);
+                                }
+                            }
+                        });
                     field(ui, "Vault secret ID", &mut self.form.entry);
                     secret_type_combo(ui, "Secret type", &mut self.form.secret_type);
                 }
@@ -1112,7 +1251,7 @@ impl DesktopApp {
         ui.add_space(18.0);
         ui.heading("Desktop agent");
         ui.label("Scheduled sync runs locally while this window is open.");
-        ui.label("For background sync after closing the window, run the separate agent.");
+        ui.label("The separate CLI agent is development-only and does not support multiple source connections. Background service controls are not available yet.");
         ui.label("Azure bindings currently require the desktop window to stay open. Sign in with Azure CLI before syncing; no Azure credentials are saved in workspace settings.");
         ui.add_space(18.0);
         card(ui).show(ui, |ui| {
@@ -1182,6 +1321,7 @@ impl eframe::App for DesktopApp {
                 ui.add_space(8.0);
                 for (page, name) in [
                     (Page::Overview, "Overview"),
+                    (Page::Sources, "Sources"),
                     (Page::Vault, "Vault"),
                     (Page::Bindings, "Bindings"),
                     (Page::Events, "Activity"),
@@ -1213,7 +1353,7 @@ impl eframe::App for DesktopApp {
                             .color(Color32::from_rgb(121, 144, 165)),
                     );
                     ui.label(
-                        RichText::new("Local agent running")
+                        RichText::new("Desktop scheduler active")
                             .size(12.0)
                             .color(Color32::from_rgb(109, 213, 178)),
                     );
@@ -1234,6 +1374,7 @@ impl eframe::App for DesktopApp {
                         self.header(ui);
                         match self.page {
                             Page::Overview => self.overview(ui),
+                            Page::Sources => self.source_connections(ui),
                             Page::Vault => self.vault(ui),
                             Page::Bindings => self.bindings(ui),
                             Page::Events => self.events(ui),
@@ -1453,6 +1594,198 @@ pub fn run(root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Runs only in an isolated Linux virtual display. No real vault or account is opened.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires Xvfb and TAR_VAULT_DOC_OUTPUT; renders synthetic documentation screens"]
+    fn render_documentation_screens() {
+        use winit::platform::x11::EventLoopBuilderExtX11;
+        let output = PathBuf::from(
+            std::env::var_os("TAR_VAULT_DOC_OUTPUT").expect("output directory required"),
+        );
+        assert!(output.is_absolute());
+        fs::create_dir_all(&output).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = DesktopApp::new(dir.path().to_path_buf()).unwrap();
+        app.sources
+            .add(Connection {
+                id: "team-files".into(),
+                location: Location::FileSystem {
+                    path: dir.path().join("team-vault.bin"),
+                },
+            })
+            .unwrap();
+        app.sources
+            .add(Connection {
+                id: "example-vault".into(),
+                location: Location::AzureKeyVault {
+                    vault_name: "example-vault".into(),
+                },
+            })
+            .unwrap();
+        app.form = BindingForm {
+            id: "application-config".into(),
+            connection: "team-files".into(),
+            entry: "api-token".into(),
+            target_kind: TargetChoice::DotEnv,
+            path: dir.path().join("app.env").display().to_string(),
+            key: "API_TOKEN".into(),
+            ..BindingForm::default()
+        };
+        app.editing = true;
+        struct Capture {
+            app: DesktopApp,
+            output: PathBuf,
+            index: usize,
+            frames: usize,
+            started: std::time::Instant,
+        }
+        const PAGES: [(Page, &str); 6] = [
+            (Page::Overview, "overview"),
+            (Page::Sources, "sources"),
+            (Page::Vault, "vault"),
+            (Page::Bindings, "bindings"),
+            (Page::Events, "activity"),
+            (Page::Settings, "settings"),
+        ];
+        impl eframe::App for Capture {
+            fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+                assert!(
+                    self.started.elapsed().as_secs() < 60,
+                    "documentation capture timed out"
+                );
+                for event in ctx.input(|i| i.events.clone()) {
+                    if let egui::Event::Screenshot { image, .. } = event {
+                        let mut file = std::io::BufWriter::new(
+                            fs::File::create(
+                                self.output.join(format!("{}.ppm", PAGES[self.index].1)),
+                            )
+                            .unwrap(),
+                        );
+                        write!(file, "P6\n{} {}\n255\n", image.size[0], image.size[1]).unwrap();
+                        for pixel in &image.pixels {
+                            file.write_all(&pixel.to_array()[..3]).unwrap();
+                        }
+                        self.index += 1;
+                        self.frames = 0;
+                    }
+                }
+                if self.index == PAGES.len() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    return;
+                }
+                if self.frames == 0 {
+                    let height = if PAGES[self.index].0 == Page::Vault {
+                        1600.0
+                    } else {
+                        960.0
+                    };
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                        1240.0, height,
+                    )));
+                }
+                self.app.page = PAGES[self.index].0;
+                self.app.update(ctx, frame);
+                self.frames += 1;
+                if self.frames == 6 {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+                }
+                ctx.request_repaint();
+            }
+        }
+        let options = eframe::NativeOptions {
+            viewport: egui::ViewportBuilder::default().with_inner_size([1240.0, 1500.0]),
+            event_loop_builder: Some(Box::new(|builder| {
+                builder.with_any_thread(true);
+            })),
+            ..Default::default()
+        };
+        eframe::run_native(
+            "TAR Vault Sync — documentation fixture",
+            options,
+            Box::new(move |cc| {
+                configure_theme(&cc.egui_ctx);
+                let icon = eframe::icon_data::from_png_bytes(BRAND_MARK).unwrap();
+                app.brand_texture = Some(cc.egui_ctx.load_texture(
+                    "brand",
+                    egui::ColorImage::from_rgba_unmultiplied(
+                        [icon.width as usize, icon.height as usize],
+                        &icon.rgba,
+                    ),
+                    egui::TextureOptions::LINEAR,
+                ));
+                Ok(Box::new(Capture {
+                    app,
+                    output,
+                    index: 0,
+                    frames: 0,
+                    started: std::time::Instant::now(),
+                }))
+            }),
+        )
+        .unwrap();
+    }
+    #[test]
+    fn multiple_filesystem_sources_bind_and_reopen_without_repointing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = DesktopApp::new(dir.path().to_path_buf()).unwrap();
+        app.sources
+            .add(Connection {
+                id: "external".into(),
+                location: Location::FileSystem {
+                    path: dir.path().join("external.bin"),
+                },
+            })
+            .unwrap();
+        app.select_source("external").unwrap();
+        app.source.create("synthetic-test-passphrase").unwrap();
+        app.source
+            .put_entry(
+                "entry",
+                &SecretPayload::new(vec![31, 32, 33], SecretType::Binary),
+            )
+            .unwrap();
+        app.form = BindingForm {
+            id: "filesystem-binding".into(),
+            connection: "external".into(),
+            entry: "entry".into(),
+            secret_type: SecretType::Binary,
+            path: dir.path().join("target.bin").display().to_string(),
+            interval: "86400".into(),
+            policy: MissingTargetPolicy::Recreate,
+            ..BindingForm::default()
+        };
+        app.save_binding();
+        assert!(!app.is_error);
+        let binding = &app.engine.config.bindings[0];
+        assert_eq!(binding.source.connection, "external");
+        assert_eq!(
+            BindingForm::from_binding(binding).binding().unwrap(),
+            *binding
+        );
+        assert!(app.remove_source("external").is_err());
+        let result = app.runtime.block_on(app.engine.sync("filesystem-binding"));
+        assert!(matches!(
+            result,
+            SyncOutcome::Applied | SyncOutcome::Unchanged
+        ));
+        app.passphrase.push_str("synthetic-discarded-input");
+        app.secret_text.push_str("synthetic-discarded-input");
+        app.select_source("local").unwrap();
+        assert!(app.passphrase.is_empty() && app.secret_text.is_empty());
+        assert!(!app.source.exists());
+        drop(app);
+        let mut reopened = DesktopApp::new(dir.path().to_path_buf()).unwrap();
+        assert_eq!(
+            reopened.engine.config.bindings[0].source.connection,
+            "external"
+        );
+        assert!(!reopened.sources.file("external").unwrap().is_unlocked());
+        reopened.delete_binding("filesystem-binding");
+        assert!(!reopened.is_error);
+        reopened.remove_source("external").unwrap();
+        assert!(dir.path().join("external.bin").exists());
+    }
     #[test]
     fn azure_binding_can_be_saved_and_edited_without_a_local_vault() {
         let dir = tempfile::tempdir().unwrap();

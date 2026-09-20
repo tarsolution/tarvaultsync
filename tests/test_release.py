@@ -1,6 +1,7 @@
 from pathlib import Path
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 import zipfile
@@ -35,6 +36,12 @@ class ReleasePackagingTests(unittest.TestCase):
                 self.assertTrue(any(name.endswith(".app/Contents/Info.plist") for name in names))
                 binary = next(item for item in archive.infolist() if item.filename.endswith("/MacOS/tar-vault-sync"))
                 self.assertTrue((binary.external_attr >> 16) & 0o111)
+                self.assertEqual(binary.create_system, 3)
+                readme = next(item for item in archive.infolist() if item.filename.endswith("/README.md"))
+                self.assertFalse((readme.external_attr >> 16) & 0o111)
+            with tarfile.open(workspace / "dist/tar-vault-sync-0.1.0-linux-arm64.tar.gz") as archive:
+                self.assertEqual(archive.getmember("tar-vault-sync-0.1.0-linux-arm64/tar-vault-sync").mode, 0o755)
+                self.assertEqual(archive.getmember("tar-vault-sync-0.1.0-linux-arm64/README.md").mode, 0o644)
             with mac.open("ab") as stream:
                 stream.write(b"corrupt")
             self.assertNotEqual(subprocess.run(verify, capture_output=True).returncode, 0)

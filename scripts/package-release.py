@@ -5,6 +5,7 @@ import hashlib
 from pathlib import Path
 import plistlib
 import shutil
+import stat
 import tarfile
 import tempfile
 import tomllib
@@ -50,14 +51,22 @@ def main():
         shutil.copy2("docs/release-notes.md", package / "README.md")
         if args.platform == "linux":
             archive = output / f"{name}.tar.gz"
+            def archive_mode(member):
+                member.mode = 0o755 if member.isdir() or member.name == f"{name}/{binary_name}" else 0o644
+                return member
             with tarfile.open(archive, "w:gz") as stream:
-                stream.add(package, arcname=name)
+                stream.add(package, arcname=name, filter=archive_mode)
         else:
             archive = output / f"{name}.zip"
             with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as stream:
                 for path in sorted(package.rglob("*")):
                     if path.is_file():
-                        stream.write(path, path.relative_to(package.parent))
+                        info = zipfile.ZipInfo.from_file(path, path.relative_to(package.parent))
+                        info.create_system = 3  # Unix modes, independent of the packaging host.
+                        info.external_attr = (stat.S_IFREG | (0o755 if path == executable else 0o644)) << 16
+                        info.compress_type = zipfile.ZIP_DEFLATED
+                        with path.open("rb") as source, stream.open(info, "w") as destination:
+                            shutil.copyfileobj(source, destination)
         with archive.open("rb") as stream:
             digest = hashlib.file_digest(stream, "sha256").hexdigest()
         (output / f"{archive.name}.sha256").write_text(f"{digest}  {archive.name}\n", encoding="ascii")

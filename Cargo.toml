@@ -19,3 +19,6 @@ zeroize = "1"
 csv-core = "0.1"
 ureq = { version = "3.4", default-features = false, features = ["rustls"] }
 url = "2"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+winit = { version = "0.30", default-features = false, features = ["x11"] }

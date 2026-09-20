@@ -27,7 +27,7 @@ Phase 1 is complete for the fake-module test host described below. Phases 2–7 
 
 ## 2. Vault entry and local vault store
 
-**Status:** Encrypted store, CLI flow, and native desktop vault entry screen implemented; platform packaging and visual QA remain open.
+**Status:** Encrypted store, CLI flow, and native desktop vault entry screen implemented. The Sources page supports multiple file-system vault references, source-specific binding selection, independent unlock state and non-destructive connection removal. Native release acceptance remains open.
 
 - Build the vault unlock/entry screen and local encrypted vault store.
 - Define the store-connection UI contract used by local and future cloud stores.
@@ -85,12 +85,16 @@ Phase 1 is complete for the fake-module test host described below. Phases 2–7 
 
 ## 8. OneDrive store connector
 
+**Status:** Desktop OAuth application registration prepared. Native authorization, encrypted transport, conflict handling and real two-device acceptance are not yet implemented. Registration alone does not complete this phase.
+
 - Store encrypted vault data in the user's OneDrive with revision-aware reads and writes.
 - Detect concurrent edits and present conflicts rather than silently overwriting a vault.
 
 **Done when:** two devices can access the same encrypted vault and a conflicting edit cannot silently discard data.
 
 ## 9. Google Drive store connector
+
+**Status:** Desktop OAuth client prepared in the existing Google project; Drive API is enabled. Native authorization, secure credential storage and real sync/conflict acceptance remain open. Existing project-wide consent branding was not modified.
 
 - Apply the same encrypted-vault, revision, and conflict contracts to Google Drive.
 
@@ -107,12 +111,16 @@ Phase 1 is complete for the fake-module test host described below. Phases 2–7 
 
 ## 11. AWS Secrets Manager connector
 
+**Current scope:** Deferred by user request; not part of the four-source delivery.
+
 - Add authentication, version/stage checks, and value retrieval through AWS Secrets Manager.
 - Confirm the intended service name before implementation; this phase interprets "AWS password manager" as AWS Secrets Manager.
 
 **Done when:** a changed AWS secret updates its targets under least-privilege access.
 
 ## 12. Google Secret Manager connector
+
+**Current scope:** Deferred by user request. Google Drive is a separate, in-scope encrypted-vault source.
 
 - Add Google Cloud Secret Manager authentication, version metadata checks, and value retrieval.
 - Confirm the intended service name before implementation; this phase interprets "Google vault" as Google Cloud Secret Manager.
