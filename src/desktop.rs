@@ -27,6 +27,7 @@ const CANVAS: Color32 = Color32::from_rgb(245, 247, 250);
 const BORDER: Color32 = Color32::from_rgb(225, 231, 237);
 const NAV: Color32 = Color32::from_rgb(19, 32, 48);
 const DANGER: Color32 = Color32::from_rgb(185, 55, 62);
+const BRAND_MARK: &[u8] = include_bytes!("../assets/branding/tar-vault-sync-mark-v1.png");
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
@@ -228,6 +229,7 @@ impl BindingForm {
 }
 
 struct DesktopApp {
+    brand_texture: Option<egui::TextureHandle>,
     root: PathBuf,
     source: Arc<VaultSource>,
     target: Arc<ProductionTarget>,
@@ -244,6 +246,9 @@ struct DesktopApp {
     secret_text: Zeroizing<String>,
     secret_file: String,
     backup_path: String,
+    import_path: String,
+    import_prefix: String,
+    import_consent: bool,
     root_input: String,
     form: BindingForm,
     editing: bool,
@@ -293,6 +298,7 @@ impl DesktopApp {
             .build()?;
         let schedules = spawn_schedules(&runtime, &engine);
         Ok(Self {
+            brand_texture: None,
             root_input: root.display().to_string(),
             root,
             source,
@@ -310,6 +316,9 @@ impl DesktopApp {
             secret_text: Zeroizing::new(String::new()),
             secret_file: String::new(),
             backup_path: String::new(),
+            import_path: String::new(),
+            import_prefix: String::new(),
+            import_consent: false,
             form: BindingForm::default(),
             editing: false,
             pending_delete_entry: None,
@@ -475,6 +484,22 @@ impl DesktopApp {
         match result {
             Ok(()) => self.notice("Secret saved as a new version."),
             Err(_) => self.error("Could not save the secret."),
+        }
+    }
+    fn import_browser_csv(&mut self) {
+        let consent = std::mem::take(&mut self.import_consent);
+        match crate::browser_import::import_file(
+            &self.source,
+            &PathBuf::from(&self.import_path),
+            &self.import_prefix,
+            consent,
+        ) {
+            Ok(count) => {
+                self.import_path.clear();
+                self.import_prefix.clear();
+                self.notice(&format!("Imported {count} encrypted records. The original plaintext CSV was not deleted; remove it when no longer needed."));
+            }
+            Err(message) => self.error(message),
         }
     }
     fn header(&mut self, ui: &mut egui::Ui) {
@@ -769,6 +794,20 @@ impl DesktopApp {
             field(ui, "Secret file path (optional)", &mut self.secret_file);
             if primary_button(ui, "Save secret").clicked() { self.put_entry(); }
         });
+        ui.add_space(12.0);
+        card(ui).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.heading("Import browser passwords");
+            ui.label("One-way import from an Edge or Chrome CSV you explicitly exported. No browser profile is accessed or changed.");
+            ui.label("Each row becomes an encrypted JSON record with its URL, username and password. Existing entries are never overwritten.");
+            field(ui, "CSV file path", &mut self.import_path);
+            field(ui, "Unique import prefix", &mut self.import_prefix);
+            ui.checkbox(&mut self.import_consent, "I approve importing this file and understand the source CSV contains plaintext passwords.");
+            if ui.add_enabled(self.import_consent && self.source.is_unlocked(), egui::Button::new("Import CSV into vault")).clicked() {
+                self.import_browser_csv();
+            }
+            ui.label(RichText::new("Maximum 8 MiB / 1,000 records. The source file is never deleted automatically. Reimporting with the same prefix is rejected.").color(MUTED));
+        });
     }
     fn bindings(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
@@ -1041,11 +1080,16 @@ impl eframe::App for DesktopApp {
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
                     egui::Frame::NONE
-                        .fill(ACCENT)
+                        .fill(CANVAS)
                         .corner_radius(10)
-                        .inner_margin(10)
+                        .inner_margin(4)
                         .show(ui, |ui| {
-                            ui.label(RichText::new("T").size(22.0).strong().color(Color32::WHITE));
+                            if let Some(texture) = &self.brand_texture {
+                                ui.add(
+                                    egui::Image::new((texture.id(), egui::vec2(48.0, 48.0)))
+                                        .alt_text("TAR Vault Sync logo"),
+                                );
+                            }
                         });
                     ui.vertical(|ui| {
                         ui.label(
@@ -1310,9 +1354,15 @@ fn write_config(path: &PathBuf, bytes: &[u8]) -> std::io::Result<()> {
 pub fn run(root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all(root.join("local"))?;
     let _agent_lock = core::acquire_agent_lock(&root.join("local/agent.lock"))?;
-    let app = DesktopApp::new(root)?;
+    let mut app = DesktopApp::new(root)?;
+    let icon = eframe::icon_data::from_png_bytes(BRAND_MARK)?;
+    let brand_image = egui::ColorImage::from_rgba_unmultiplied(
+        [icon.width as usize, icon.height as usize],
+        &icon.rgba,
+    );
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
+            .with_icon(icon)
             .with_inner_size([1240.0, 840.0])
             .with_min_inner_size([900.0, 600.0]),
         ..Default::default()
@@ -1322,6 +1372,11 @@ pub fn run(root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         options,
         Box::new(move |cc| {
             configure_theme(&cc.egui_ctx);
+            app.brand_texture = Some(cc.egui_ctx.load_texture(
+                "tar-vault-sync-brand",
+                brand_image,
+                egui::TextureOptions::LINEAR,
+            ));
             Ok(Box::new(app))
         }),
     )?;
@@ -1331,6 +1386,56 @@ pub fn run(root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn embedded_brand_mark_is_valid_square_rgba_with_transparency() {
+        let icon = eframe::icon_data::from_png_bytes(BRAND_MARK).unwrap();
+        assert_eq!(icon.width, icon.height);
+        assert!(icon.width >= 256);
+        assert_eq!(icon.rgba.len(), (icon.width * icon.height * 4) as usize);
+        assert!(icon.rgba.chunks_exact(4).any(|pixel| pixel[3] == 0));
+        assert!(icon.rgba.chunks_exact(4).any(|pixel| pixel[3] == 255));
+        let image = egui::ColorImage::from_rgba_unmultiplied(
+            [icon.width as usize, icon.height as usize],
+            &icon.rgba,
+        );
+        let ctx = egui::Context::default();
+        let texture = ctx.load_texture("brand-test", image, egui::TextureOptions::LINEAR);
+        assert_eq!(texture.size(), [icon.width as usize, icon.height as usize]);
+    }
+
+    #[test]
+    fn browser_import_action_requires_fresh_consent_and_redacts_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv = dir.path().join("synthetic.csv");
+        fs::write(
+            &csv,
+            b"url,username,password\nhttps://example.invalid,user,synthetic-probe",
+        )
+        .unwrap();
+        let mut app = DesktopApp::new(dir.path().to_path_buf()).unwrap();
+        app.source.create("test-only-passphrase").unwrap();
+        app.import_path = csv.display().to_string();
+        app.import_prefix = "browser".into();
+        app.import_browser_csv();
+        assert!(app.is_error);
+        assert!(app.source.entries().unwrap().is_empty());
+        app.import_consent = true;
+        app.import_browser_csv();
+        assert!(!app.is_error);
+        assert!(!app.import_consent);
+        assert!(app.import_path.is_empty());
+        assert_eq!(app.source.entries().unwrap().len(), 1);
+        assert!(!app.message.contains("synthetic-probe"));
+        assert!(!app.message.contains("example.invalid"));
+        app.import_path = csv.display().to_string();
+        app.import_prefix = "browser".into();
+        app.import_consent = true;
+        app.import_browser_csv();
+        assert!(app.is_error);
+        assert!(!app.import_consent);
+        assert_eq!(app.source.entries().unwrap().len(), 1);
+    }
+
     #[test]
     fn binding_form_emits_typed_targets_without_secret_values() {
         let mut form = BindingForm {

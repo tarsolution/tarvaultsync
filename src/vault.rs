@@ -222,6 +222,63 @@ impl LocalVault {
         Ok(())
     }
 
+    /// Insert an approved import in one encrypted write, without overwriting entries.
+    pub(crate) fn import_new(
+        &mut self,
+        entries: &[(String, SecretPayload)],
+    ) -> Result<(), VaultError> {
+        self.touch()?;
+        let _write_lock = lock_for_update(&self.path)?;
+        self.reload()?;
+        let mut ids = std::collections::BTreeSet::new();
+        let mut pending = Vec::new();
+        let mut versions = std::collections::BTreeSet::new();
+        if entries.is_empty() || entries.len() > 1000 {
+            return Err(VaultError::InvalidInput);
+        }
+        for (id, payload) in entries {
+            if !safe_label(id)
+                || !ids.insert(id)
+                || payload.as_bytes().len() > MAX_VAULT_BYTES as usize / 2
+            {
+                return Err(VaultError::InvalidInput);
+            }
+            if self.manifest.entries.contains_key(id) {
+                return Err(VaultError::AlreadyExists);
+            }
+            let version = loop {
+                let mut random = [0; 16];
+                OsRng.fill_bytes(&mut random);
+                let candidate = hex_version(&random);
+                if !self.sealed.contains_key(&candidate) && versions.insert(candidate.clone()) {
+                    break candidate;
+                }
+            };
+            let sealed = seal_payload(&self.key, id, &version, payload.as_bytes())?;
+            pending.push((
+                id,
+                EntryMeta {
+                    kind: payload.kind.clone(),
+                    version,
+                },
+                sealed,
+            ));
+        }
+        for (id, meta, sealed) in pending {
+            self.sealed.insert(meta.version.clone(), sealed);
+            self.manifest.entries.insert(id.clone(), meta);
+        }
+        if let Err(error) = self.persist(false) {
+            for (id, _) in entries {
+                if let Some(meta) = self.manifest.entries.remove(id) {
+                    self.sealed.remove(&meta.version);
+                }
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
     pub fn get_version(&mut self, entry_id: &str) -> Result<SourceVersion, VaultError> {
         self.touch()?;
         self.reload()?;
@@ -655,6 +712,12 @@ impl VaultSource {
     }
     pub fn put_entry(&self, id: &str, payload: &SecretPayload) -> Result<(), VaultError> {
         self.with_open(|vault| vault.put(id, payload).map(|_| ()))
+    }
+    pub(crate) fn import_entries(
+        &self,
+        entries: &[(String, SecretPayload)],
+    ) -> Result<(), VaultError> {
+        self.with_open(|vault| vault.import_new(entries))
     }
     pub fn remove_entry(&self, id: &str) -> Result<(), VaultError> {
         self.with_open(|vault| vault.remove(id))

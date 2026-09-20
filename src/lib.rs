@@ -1,3 +1,4 @@
+mod browser_import;
 pub mod core;
 pub mod desktop;
 pub mod ipc;

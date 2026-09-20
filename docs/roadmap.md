@@ -66,6 +66,8 @@ Phase 1 is complete for the fake-module test host described below. Phases 2–5 
 
 ## 6. Microsoft password manager import and sync
 
+**Status:** Import-only scope selected; native CSV-to-encrypted-vault implementation is in development. Real Edge export/UI acceptance remains open. See [browser import](browser-import.md).
+
 - Investigate supported Microsoft Edge/password-manager import and write interfaces and their platform restrictions.
 - Implement user-approved import first. Add ongoing sync only if a supported API permits it safely.
 - Define conflict resolution and deletion rules before enabling two-way changes.
@@ -73,6 +75,8 @@ Phase 1 is complete for the fake-module test host described below. Phases 2–5 
 **Done when:** the documented, supported integration works end to end, or the phase records a clear feasibility decision and a safe import-only scope.
 
 ## 7. Chrome password manager import and sync
+
+**Status:** Shares the explicit-consent CSV import implementation; continuous sync is disabled. Real Chrome export/UI acceptance remains open. See [browser import](browser-import.md).
 
 - Investigate supported Chrome/Google Password Manager import and write interfaces.
 - Follow the same explicit-consent, conflict, and deletion rules as phase 6; do not modify browser profile databases directly.
